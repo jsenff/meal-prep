@@ -19,6 +19,9 @@
   .who{display:flex;gap:10px;margin-top:4px;font-size:12px;color:#555}
   .who label{display:flex;align-items:center;gap:3px}
   .who input{padding:0}
+  .guestrow{margin-top:2px;font-size:12px;color:#555}
+  .guestrow label{display:flex;align-items:center;gap:3px}
+  .guestrow input{padding:0}
   .status{font-size:13px;color:#555}
   .status.err{color:#b00}
   .note{font-size:13px;color:#666}
@@ -61,7 +64,7 @@
 
 <section>
   <h2>Week plan</h2>
-  <div class="note">Tick who is eating each meal. Shared ingredients scale with the number of people ticked. Ingredients with a Person set in the sheet only count when that person is ticked. For extra lunches, plan them as their own Lunch or Dinner cell.</div>
+  <div class="note" id="plannote"></div>
   <div id="plan"></div>
 </section>
 <section><h2>Batch cook</h2><div id="cook"></div></section>
@@ -87,9 +90,16 @@ window.onerror=(msg,src,line)=>{document.body.insertAdjacentHTML('afterbegin',
 
 const SHEET_URL='https://docs.google.com/spreadsheets/d/e/2PACX-1vR8a2tUSBz0YwDhP-TTtSxfkeNoGG5LKassN-daKbDd2RQDUX4p38Yno6PaYYzLcVSAT_Bq95cWtiMR/pub?gid=0&single=true&output=csv';
 const STAPLES_URL='https://docs.google.com/spreadsheets/d/e/2PACX-1vR8a2tUSBz0YwDhP-TTtSxfkeNoGG5LKassN-daKbDd2RQDUX4p38Yno6PaYYzLcVSAT_Bq95cWtiMR/pub?gid=188738644&single=true&output=csv';
+
+// Paste the link you use to edit the Google Sheet between the quotes. Leave empty to hide the link.
 const SHEET_EDIT_URL='https://docs.google.com/spreadsheets/d/13hRoqtHH3KLEAPcu1UomTvQtxSK7C-9tRimNdeOJnmE/edit?usp=sharing';
+
 // Names used in the Person column of the Meals tab, and shown as ticks in the planner.
 const PEOPLE=['John','Clare'];
+
+// Ticking Guests on a planner cell adds this many extra portions, made as this person's version.
+const GUEST_COUNT=2;
+const GUEST_VERSION='John';
 
 const DAYS=['Monday','Tuesday','Wednesday','Thursday','Friday','Saturday','Sunday'];
 const SLOTS=['Lunch','Dinner'];
@@ -104,9 +114,10 @@ const COOKS=[
 // Order categories appear on the shopping list and cook cards (roughly your walk round the shop).
 // Names are matched ignoring case. Categories not listed come next in alphabetical order, then Other.
 const CATEGORY_ORDER=['Meat','Veg','Fruit','Dairy/Eggs','Dry Goods','Frozen','Other'];
-
-// Accepts current and older saved formats. Plan cells become {meal: name, who: [names eating]}.
-// Older cells (with a multiplier) default to everyone eating.
+  
+// Accepts current and older saved formats.
+// Plan cells become {meal: name, who: [names eating], guests: true/false}.
+// Older cells (with a multiplier) default to everyone eating and no guests.
 function migrate(s){
   s=s||{};
   const oldNames={};
@@ -115,13 +126,14 @@ function migrate(s){
   for(const [k,v] of Object.entries(s.plan||{})){
     const slot=k.split('|')[1];
     if(!SLOTS.includes(slot)) continue;
-    let name=null, who=PEOPLE.slice();
+    let name=null, who=PEOPLE.slice(), guests=false;
     if(typeof v==='string') name=oldNames[v];
     else if(v){
       name=v.meal||oldNames[v.id];
       if(Array.isArray(v.who)) who=PEOPLE.filter(p=>v.who.includes(p));
+      guests=!!v.guests;
     }
-    if(name) plan[k]={meal:name,who};
+    if(name) plan[k]={meal:name,who,guests};
   }
   const meals=(s.meals||[]).map(m=>({name:m.name,
     ingredients:(m.ingredients||[]).map(i=>({...i,person:i.person||''}))}));
@@ -166,14 +178,20 @@ function currentCook(){
   return COOKS.some(c=>c.name===name)?name:'';
 }
 
+// Total portions for one planner cell: people ticked, plus guests if ticked.
+const portionsFor=cell=>cell.who.length+(cell.guests?GUEST_COUNT:0);
+
 // How much of an ingredient one planner cell needs.
-// Shared ingredients (no person) are per person, so they scale with how many are eating.
-// Person-specific ingredients count only if that person is ticked.
+// Shared ingredients (no person) are per person, so they scale with the total portions.
+// Person-specific ingredients count once for that person if ticked, and guests add
+// GUEST_COUNT more portions of the GUEST_VERSION person's ingredients.
 function amountFor(ing,cell){
-  if(!ing.person) return ing.qty*cell.who.length;
-  return cell.who.includes(ing.person)?ing.qty:0;
+  if(!ing.person) return ing.qty*portionsFor(cell);
+  let n=cell.who.includes(ing.person)?1:0;
+  if(cell.guests&&ing.person===GUEST_VERSION) n+=GUEST_COUNT;
+  return ing.qty*n;
 }
-if(SHEET_EDIT_URL){const a=$('sheetlink');a.href=SHEET_EDIT_URL;a.style.display='inline';}
+
 // An ingredient only needs a category once, anywhere in the sheet. First one found wins.
 function buildCats(){
   catMap=new Map();
@@ -307,6 +325,12 @@ function renderMeals(){
 }
 
 function renderPlan(){
+  $('plannote').textContent=
+    'Tick who is eating each meal. Shared ingredients scale with the number of portions. '
+    +'Ingredients with a Person set in the sheet only count when that person is ticked. '
+    +`Guests adds ${GUEST_COUNT} extra portions, made the ${GUEST_VERSION} way. `
+    +'For extra lunches, plan them as their own Lunch or Dinner cell.';
+
   // Days covered by the selected cook are tinted, the rest fade. With no cook selected, nothing changes.
   const cc=COOKS.find(c=>c.name===currentCook());
   const dayCls=d=>cc?(cc.days.includes(d)?'dayon':'dayoff'):'';
@@ -323,9 +347,10 @@ function renderPlan(){
       return `<td class="${dayCls(d)}">
         <select data-day="${d}" data-slot="${s}">${opts(cell&&cell.meal)}</select>
         ${cell?`<div class="who">${PEOPLE.map(p=>
-          `<label><input type="checkbox" data-day="${d}" data-slot="${s}" data-who="${esc(p)}"${cell.who.includes(p)?' checked':''}> ${esc(p)}</label>`).join('')}</div>`:''}
+          `<label><input type="checkbox" data-day="${d}" data-slot="${s}" data-who="${esc(p)}"${cell.who.includes(p)?' checked':''}> ${esc(p)}</label>`).join('')}</div>
+        <div class="guestrow"><label><input type="checkbox" data-day="${d}" data-slot="${s}" data-guests="1"${cell.guests?' checked':''}> Guests (+${GUEST_COUNT})</label></div>`:''}
         ${missing?'<div class="warn">Not in sheet, ignored in totals</div>':''}
-        ${cell&&!cell.who.length?'<div class="warn">Nobody ticked, ignored in totals</div>':''}
+        ${cell&&portionsFor(cell)===0?'<div class="warn">Nobody ticked, ignored in totals</div>':''}
       </td>`;
     }).join('')+'</tr>').join('')+
     '</table>';
@@ -333,7 +358,13 @@ function renderPlan(){
 
 function eatenLabel(d,s,cell){
   const t=d.slice(0,3)+' '+s.toLowerCase();
-  return cell.who.length===PEOPLE.length?t:`${t} (${cell.who.join(', ')} only)`;
+  const bits=[];
+  if(!cell.who.length) bits.push(`${GUEST_COUNT} guests only`);
+  else{
+    if(cell.who.length!==PEOPLE.length) bits.push(cell.who.join(', ')+' only');
+    if(cell.guests) bits.push(`+${GUEST_COUNT} guests`);
+  }
+  return bits.length?`${t} (${bits.join(', ')})`:t;
 }
 
 function renderCook(){
@@ -352,12 +383,13 @@ function renderCook(){
     const totals=new Map();
 
     for(const d of c.days) for(const s of SLOTS){
-      const cell=state.plan[d+'|'+s]; if(!cell||!cell.who.length) continue;
+      const cell=state.plan[d+'|'+s]; if(!cell||portionsFor(cell)===0) continue;
       const m=getMeal(cell.meal); if(!m) continue;
       const key=m.name.toLowerCase();
-      if(!dishes.has(key)) dishes.set(key,{name:m.name,portions:0,eat:[],meal:m,amounts:new Map()});
+      if(!dishes.has(key)) dishes.set(key,{name:m.name,portions:0,guests:false,eat:[],meal:m,amounts:new Map()});
       const dish=dishes.get(key);
-      dish.portions+=cell.who.length;
+      dish.portions+=portionsFor(cell);
+      if(cell.guests) dish.guests=true;
       dish.eat.push(eatenLabel(d,s,cell));
       m.ingredients.forEach((i,ix)=>{
         const a=amountFor(i,cell); if(!a) return;
@@ -373,7 +405,7 @@ function renderCook(){
         <div class="title">Cook ${esc(dish.name)} (${dish.portions} portion${dish.portions===1?'':'s'})</div>
         <div class="eat">Eaten: ${dish.eat.map(esc).join(', ')}</div>
         <ul>${dish.meal.ingredients.map((i,ix)=>dish.amounts.has(ix)
-          ?`<li>${esc(i.name)}${i.person?` (${esc(i.person)})`:''}: ${fmt(dish.amounts.get(ix),i.unit)}</li>`:'').join('')}</ul>
+          ?`<li>${esc(i.name)}${i.person?` (${esc(i.person)}${dish.guests&&i.person===GUEST_VERSION?', incl. guests':''})`:''}: ${fmt(dish.amounts.get(ix),i.unit)}</li>`:'').join('')}</ul>
       </div>`).join('');
 
     const rows=[...totals.values()];
@@ -496,9 +528,12 @@ document.addEventListener('change',e=>{
   if(d.who!==undefined){
     const cell=state.plan[k]; if(!cell) return;
     cell.who=PEOPLE.filter(p=>p===d.who?t.checked:cell.who.includes(p));
+  } else if(d.guests!==undefined){
+    const cell=state.plan[k]; if(!cell) return;
+    cell.guests=t.checked;
   } else if(t.value){
     const prev=state.plan[k];
-    state.plan[k]={meal:t.value,who:prev?prev.who:PEOPLE.slice()};
+    state.plan[k]={meal:t.value,who:prev?prev.who:PEOPLE.slice(),guests:prev?!!prev.guests:false};
   } else {
     delete state.plan[k];
   }
@@ -522,6 +557,7 @@ $('imp').onchange=e=>{
   r.readAsText(f);
 };
 
+if(SHEET_EDIT_URL){const a=$('sheetlink');a.href=SHEET_EDIT_URL;a.style.display='inline';}
 buildCats();
 render();
 loadSheet();
