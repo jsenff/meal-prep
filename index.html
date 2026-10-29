@@ -242,7 +242,23 @@ function renderPlan(){
     }).join('')+'</tr>').join('')+
     '</table>';
 }
-
+// Groups rows by category in shop-walk order. Returns [{label, rows}].
+function groupByCategory(rows){
+  const groups=new Map();
+  for(const r of rows){
+    const c=catMap.get(r.name.toLowerCase())||'';
+    const gk=c?c.toLowerCase():'\uffff';
+    if(!groups.has(gk)) groups.set(gk,{label:c||'Other',rows:[]});
+    groups.get(gk).rows.push(r);
+  }
+  const rank=gk=>{
+    if(gk==='\uffff') return 1e6;
+    const i=CATEGORY_ORDER.findIndex(x=>x.toLowerCase()===gk);
+    return i>=0?i:1000;
+  };
+  return [...groups.keys()].sort((a,b)=>rank(a)-rank(b)||a.localeCompare(b))
+    .map(gk=>{const g=groups.get(gk); g.rows.sort((a,b)=>a.name.localeCompare(b.name)); return g;});
+}
 function renderCook(){
   $('cook').innerHTML='<div class="cooks">'+COOKS.map(c=>{
     const dishes=new Map();
@@ -271,11 +287,12 @@ function renderCook(){
           `<li>${esc(i.name)}: ${fmt(i.qty*dish.portions,i.unit)}</li>`).join('')}</ul>
       </div>`).join('');
 
-    const rows=[...totals.values()].sort((a,b)=>a.name.localeCompare(b.name));
+    const rows=[...totals.values()];
     const totalHtml=rows.length?`
       <b>Combined ingredients</b>
-      <table><tr><th>Item</th><th>Total</th></tr>${rows.map(r=>
-        `<tr><td>${esc(r.name)}</td><td>${fmt(r.qty,r.unit)}</td></tr>`).join('')}</table>`:'';
+      <table><tr><th>Item</th><th>Total</th></tr>${groupByCategory(rows).map(g=>
+        `<tr class="cat"><td colspan="2">${esc(g.label)}</td></tr>`+g.rows.map(r=>
+          `<tr><td>${esc(r.name)}</td><td>${fmt(r.qty,r.unit)}</td></tr>`).join('')).join('')}</table>`:'';
 
     return `<div class="cook">
       <h3>${esc(c.name)}</h3>
