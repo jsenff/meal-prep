@@ -16,6 +16,7 @@
   .multrow input{width:70px}
   .status{font-size:13px;color:#555}
   .status.err{color:#b00}
+  .note{font-size:13px;color:#666}
   .warn{color:#b60;font-size:12px;margin-top:4px}
   .cooks{display:flex;gap:24px;flex-wrap:wrap}
   .cook{flex:1;min-width:380px;border:1px solid #ccc;border-radius:6px;padding:12px 16px}
@@ -26,6 +27,11 @@
   .dish .eat{color:#666;font-size:13px}
   .dish ul{margin:4px 0 0 18px;padding:0;font-size:14px}
   details{margin-bottom:6px}
+  .cat td{background:#eaf0f6;font-weight:600}
+  .done td{color:#999;text-decoration:line-through}
+  .tickcol{width:32px;text-align:center}
+  .staplelist{display:flex;flex-wrap:wrap;gap:6px 20px;font-size:14px;margin:6px 0 16px}
+  .gray{color:#888;font-size:12px}
 </style>
 </head>
 <body>
@@ -39,7 +45,16 @@
 
 <section><h2>Week plan</h2><div id="plan"></div></section>
 <section><h2>Batch cook</h2><div id="cook"></div></section>
-<section><h2>Shopping list</h2><div id="shop"></div></section>
+
+<section>
+  <h2>Shopping list</h2>
+  <h3>Staples</h3>
+  <div class="note">Untick anything you already have this week.</div>
+  <div id="staples"></div>
+  <h3>To buy</h3>
+  <div class="row"><button id="clearTicks">Clear ticks</button><span id="tickinfo" class="status"></span></div>
+  <div id="shop"></div>
+</section>
 
 <section>
   <button id="exp">Export plan JSON</button>
@@ -52,6 +67,9 @@ window.onerror=(msg,src,line)=>{document.body.insertAdjacentHTML('afterbegin',
 
 const SHEET_URL='https://docs.google.com/spreadsheets/d/e/2PACX-1vR8a2tUSBz0YwDhP-TTtSxfkeNoGG5LKassN-daKbDd2RQDUX4p38Yno6PaYYzLcVSAT_Bq95cWtiMR/pub?gid=0&single=true&output=csv';
 
+// Paste the published CSV link for the Staples tab between the quotes. Leave empty to switch staples off.
+const STAPLES_URL='';
+
 const DAYS=['Monday','Tuesday','Wednesday','Thursday','Friday','Saturday','Sunday'];
 const SLOTS=['Lunch','Dinner'];
 
@@ -60,6 +78,10 @@ const COOKS=[
   {name:'Tuesday cook',  days:['Thursday','Friday','Saturday']},
   {name:'Saturday cook', days:['Sunday','Monday','Tuesday','Wednesday']}
 ];
+
+// Order categories appear on the shopping list (roughly your walk round the shop).
+// Names are matched ignoring case. Categories not listed come next in alphabetical order, then Other.
+const CATEGORY_ORDER=['Produce','Bakery','Meat and fish','Dairy and eggs','Tins and jars','Dry goods','Frozen'];
 
 // Accepts current and older saved formats. Plan cells become {meal: name, mult}.
 function migrate(s){
@@ -76,21 +98,33 @@ function migrate(s){
     if(name) plan[k]={meal:name,mult};
   }
   const meals=(s.meals||[]).map(m=>({name:m.name,ingredients:m.ingredients||[]}));
-  return {plan,meals};
+  return {plan,meals,staples:s.staples||[],ticked:s.ticked||{},skipStaples:s.skipStaples||{}};
 }
 
-let state={plan:{}}, meals=[], statusMsg='', statusErr=false;
+let state={plan:{},ticked:{},skipStaples:{}}, meals=[], staples=[], catMap=new Map();
+let statusMsg='', statusErr=false;
 try{
   const saved=migrate(JSON.parse(localStorage.getItem('mealprep')||'null'));
-  state.plan=saved.plan; meals=saved.meals;
+  state.plan=saved.plan; state.ticked=saved.ticked; state.skipStaples=saved.skipStaples;
+  meals=saved.meals; staples=saved.staples;
 }catch(err){}
 
 const $=id=>document.getElementById(id);
 const esc=s=>String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const fmt=(q,u)=>`${+q.toFixed(2)} ${esc(u)}`;
+const skey=(n,u)=>String(n).trim().toLowerCase()+'|'+u;
 const getMeal=name=>meals.find(m=>m.name.toLowerCase()===String(name).toLowerCase());
-const persist=()=>localStorage.setItem('mealprep',JSON.stringify({plan:state.plan,meals}));
+const persist=()=>localStorage.setItem('mealprep',JSON.stringify(
+  {plan:state.plan,ticked:state.ticked,skipStaples:state.skipStaples,meals,staples}));
 const save=()=>{persist();render();};
+
+// An ingredient only needs a category once, anywhere in the sheet. First one found wins.
+function buildCats(){
+  catMap=new Map();
+  const put=(n,c)=>{ if(!c) return; const k=String(n).trim().toLowerCase(); if(!catMap.has(k)) catMap.set(k,c); };
+  for(const m of meals) for(const i of m.ingredients) put(i.name,i.cat);
+  for(const s of staples) put(s.name,s.cat);
+}
 
 function parseCSV(t){
   const rows=[]; let row=[], f='', q=false;
@@ -110,6 +144,7 @@ function parseCSV(t){
   return rows;
 }
 
+// Meals tab columns: Meal, Ingredient, Qty, Unit, Category (optional)
 function parseMeals(text){
   const rows=parseCSV(text);
   if(rows.length&&String(rows[0][0]).trim().toLowerCase()==='meal') rows.shift();
@@ -120,29 +155,57 @@ function parseMeals(text){
     const ing=String(r[1]||'').trim();
     const qty=parseFloat(r[2]);
     const unit=String(r[3]||'').trim().toLowerCase();
+    const cat=String(r[4]||'').trim();
     if(!name||!ing||!(qty>0)||!unit){skipped++;continue;}
     const key=name.toLowerCase();
     if(!map.has(key)) map.set(key,{name,ingredients:[]});
-    map.get(key).ingredients.push({name:ing,qty,unit});
+    map.get(key).ingredients.push({name:ing,qty,unit,cat});
   }
   return {meals:[...map.values()],skipped};
 }
 
+// Staples tab columns: Item, Qty, Unit, Category (optional)
+function parseStaples(text){
+  const rows=parseCSV(text);
+  if(rows.length&&String(rows[0][0]).trim().toLowerCase()==='item') rows.shift();
+  const out=[]; let skipped=0;
+  for(const r of rows){
+    if(r.every(x=>String(x).trim()==='')) continue;
+    const name=String(r[0]||'').trim();
+    const qty=parseFloat(r[1]);
+    const unit=String(r[2]||'').trim().toLowerCase();
+    const cat=String(r[3]||'').trim();
+    if(!name||!(qty>0)||!unit){skipped++;continue;}
+    out.push({name,qty,unit,cat});
+  }
+  return {staples:out,skipped};
+}
+
+async function fetchCSV(url){
+  const res=await fetch(url+(url.includes('?')?'&':'?')+'_='+Date.now(),{cache:'no-store'});
+  if(!res.ok) throw new Error('HTTP '+res.status);
+  return res.text();
+}
+
 async function loadSheet(){
   statusMsg='Loading from sheet...'; statusErr=false; renderStatus();
+  const parts=[]; let err=false;
   try{
-    const res=await fetch(SHEET_URL+'&_='+Date.now(),{cache:'no-store'});
-    if(!res.ok) throw new Error('HTTP '+res.status);
-    const {meals:m,skipped}=parseMeals(await res.text());
-    meals=m; persist();
-    const time=new Date().toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'});
-    statusMsg=m.length
-      ?`Loaded ${m.length} meals at ${time}`+(skipped?`. ${skipped} row(s) skipped (missing meal, ingredient, qty or unit).`:'')
-      :'The sheet has no meals yet. Add rows (Meal, Ingredient, Qty, Unit), wait a few minutes for the published copy to update, then reload.';
-  }catch(err){
-    statusErr=true;
-    statusMsg=`Could not load the sheet (${err.message}). Showing the last saved copy.`;
+    const {meals:m,skipped}=parseMeals(await fetchCSV(SHEET_URL));
+    meals=m;
+    parts.push(m.length?`${m.length} meals`+(skipped?` (${skipped} row(s) skipped)`:''):'no meals in the sheet yet');
+  }catch(e){err=true;parts.push(`meals failed to load (${e.message}), using last saved copy`);}
+  if(STAPLES_URL){
+    try{
+      const {staples:s,skipped}=parseStaples(await fetchCSV(STAPLES_URL));
+      staples=s;
+      parts.push(s.length?`${s.length} staples`+(skipped?` (${skipped} row(s) skipped)`:''):'no staples in the sheet yet');
+    }catch(e){err=true;parts.push(`staples failed to load (${e.message}), using last saved copy`);}
   }
+  buildCats(); persist();
+  const time=new Date().toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'});
+  statusMsg=`${err?'Finished with errors':'Loaded'} at ${time}: ${parts.join('; ')}.`;
+  statusErr=err;
   render();
 }
 
@@ -154,7 +217,7 @@ function renderMeals(){
   $('meals').innerHTML=meals.length?meals.map(m=>`
     <details>
       <summary><b>${esc(m.name)}</b> (${m.ingredients.length} ingredients)</summary>
-      <ul>${m.ingredients.map(i=>`<li>${esc(i.name)}: ${fmt(i.qty,i.unit)}</li>`).join('')}</ul>
+      <ul>${m.ingredients.map(i=>`<li>${esc(i.name)}: ${fmt(i.qty,i.unit)}${i.cat?` <span class="gray">${esc(i.cat)}</span>`:''}</li>`).join('')}</ul>
     </details>`).join(''):'<p>No meals loaded.</p>';
 }
 
@@ -194,7 +257,7 @@ function renderCook(){
       dish.portions+=cell.mult;
       dish.eat.push(d.slice(0,3)+' '+s.toLowerCase()+(cell.mult!==1?` (x${cell.mult})`:''));
       for(const i of m.ingredients){
-        const k=i.name.trim().toLowerCase()+'|'+i.unit;
+        const k=skey(i.name,i.unit);
         if(!totals.has(k)) totals.set(k,{name:i.name.trim(),unit:i.unit,qty:0});
         totals.get(k).qty+=i.qty*cell.mult;
       }
@@ -223,31 +286,96 @@ function renderCook(){
   }).join('')+'</div>';
 }
 
-function renderShop(){
-  const totals={};
-  for(const cell of Object.values(state.plan)){
-    const m=getMeal(cell.meal); if(!m) continue;
-    for(const i of m.ingredients){
-      const k=i.name.trim().toLowerCase()+'|'+i.unit;
-      totals[k]=totals[k]||{name:i.name.trim(),unit:i.unit,qty:0};
-      totals[k].qty+=i.qty*cell.mult;
-    }
+function renderStaples(){
+  const el=$('staples');
+  if(!staples.length){
+    el.innerHTML=STAPLES_URL
+      ?'<p class="note">No staples loaded.</p>'
+      :'<p class="note">Staples are not connected yet. Paste the published Staples CSV link into STAPLES_URL near the top of the file.</p>';
+    return;
   }
-  const rows=Object.values(totals).sort((a,b)=>a.name.localeCompare(b.name));
-  $('shop').innerHTML=rows.length
-    ?'<table><tr><th>Item</th><th>Total</th></tr>'+rows.map(r=>
-       `<tr><td>${esc(r.name)}</td><td>${fmt(r.qty,r.unit)}</td></tr>`).join('')+'</table>'
-    :'<p>Plan some meals to build the list.</p>';
+  el.innerHTML='<div class="staplelist">'+staples.map(s=>{
+    const k=skey(s.name,s.unit);
+    return `<label><input type="checkbox" data-staple="${esc(k)}"${state.skipStaples[k]?'':' checked'}> ${esc(s.name)} (${fmt(s.qty,s.unit)})</label>`;
+  }).join('')+'</div>';
 }
 
-function render(){renderStatus();renderMeals();renderPlan();renderCook();renderShop();}
+function shopTotals(){
+  const totals=new Map();
+  const add=(name,unit,qty)=>{
+    const k=skey(name,unit);
+    if(!totals.has(k)) totals.set(k,{key:k,name:name.trim(),unit,qty:0});
+    totals.get(k).qty+=qty;
+  };
+  for(const cell of Object.values(state.plan)){
+    const m=getMeal(cell.meal); if(!m) continue;
+    for(const i of m.ingredients) add(i.name,i.unit,i.qty*cell.mult);
+  }
+  for(const s of staples){
+    if(state.skipStaples[skey(s.name,s.unit)]) continue;
+    add(s.name,s.unit,s.qty);
+  }
+  return [...totals.values()];
+}
+
+function renderShop(){
+  const rows=shopTotals();
+  if(!rows.length){
+    $('shop').innerHTML='<p>Plan some meals to build the list.</p>';
+    $('tickinfo').textContent='';
+    return;
+  }
+  const groups=new Map(); let uncat=0;
+  for(const r of rows){
+    const c=catMap.get(r.name.toLowerCase())||'';
+    if(!c) uncat++;
+    const gk=c?c.toLowerCase():'\uffff';
+    if(!groups.has(gk)) groups.set(gk,{label:c||'Other',rows:[]});
+    groups.get(gk).rows.push(r);
+  }
+  const rank=gk=>{
+    if(gk==='\uffff') return 1e6;
+    const i=CATEGORY_ORDER.findIndex(x=>x.toLowerCase()===gk);
+    return i>=0?i:1000;
+  };
+  const keys=[...groups.keys()].sort((a,b)=>rank(a)-rank(b)||a.localeCompare(b));
+
+  let html='<table><tr><th class="tickcol"></th><th>Item</th><th>Total</th></tr>';
+  for(const gk of keys){
+    const g=groups.get(gk);
+    html+=`<tr class="cat"><td colspan="3">${esc(g.label)}</td></tr>`;
+    g.rows.sort((a,b)=>a.name.localeCompare(b.name));
+    for(const r of g.rows){
+      const done=!!state.ticked[r.key];
+      html+=`<tr class="${done?'done':''}">
+        <td class="tickcol"><input type="checkbox" data-tick="${esc(r.key)}"${done?' checked':''}></td>
+        <td>${esc(r.name)}</td><td>${fmt(r.qty,r.unit)}</td></tr>`;
+    }
+  }
+  html+='</table>';
+  if(uncat) html+=`<p class="note">${uncat} item(s) have no category and are listed under Other. Add a category in the sheet to move them.</p>`;
+  $('shop').innerHTML=html;
+  const n=rows.filter(r=>state.ticked[r.key]).length;
+  $('tickinfo').textContent=`${n} of ${rows.length} ticked`;
+}
+
+function render(){renderStatus();renderMeals();renderPlan();renderCook();renderStaples();renderShop();}
 
 $('reload').onclick=loadSheet;
+$('clearTicks').onclick=()=>{state.ticked={};save();};
 
 document.addEventListener('change',e=>{
-  const t=e.target;
-  if(!t.dataset.day) return;
-  const k=t.dataset.day+'|'+t.dataset.slot;
+  const t=e.target, d=t.dataset;
+  if(d.tick!==undefined){
+    if(t.checked) state.ticked[d.tick]=true; else delete state.ticked[d.tick];
+    persist(); renderShop(); return;
+  }
+  if(d.staple!==undefined){
+    if(t.checked) delete state.skipStaples[d.staple]; else state.skipStaples[d.staple]=true;
+    save(); return;
+  }
+  if(!d.day) return;
+  const k=d.day+'|'+d.slot;
   if(t.classList.contains('mult')){
     const v=parseFloat(t.value);
     if(state.plan[k]) state.plan[k].mult=v>0?v:1;
@@ -262,16 +390,22 @@ document.addEventListener('change',e=>{
 
 $('exp').onclick=()=>{
   const a=document.createElement('a');
-  a.href=URL.createObjectURL(new Blob([JSON.stringify({plan:state.plan},null,2)],{type:'application/json'}));
+  a.href=URL.createObjectURL(new Blob([JSON.stringify({plan:state.plan,skipStaples:state.skipStaples},null,2)],{type:'application/json'}));
   a.download='meal-plan.json'; a.click();
 };
 $('imp').onchange=e=>{
   const f=e.target.files[0]; if(!f) return;
   const r=new FileReader();
-  r.onload=()=>{try{state.plan=migrate(JSON.parse(r.result)).plan;save();}catch{alert('Invalid file');}};
+  r.onload=()=>{
+    try{
+      const imp=migrate(JSON.parse(r.result));
+      state.plan=imp.plan; state.skipStaples=imp.skipStaples; save();
+    }catch{alert('Invalid file');}
+  };
   r.readAsText(f);
 };
 
+buildCats();
 render();
 loadSheet();
 </script>
