@@ -55,7 +55,7 @@
 
 <section>
   <h2>Meal library</h2>
-  <div class="row"><button id="reload">Reload from sheet</button><span id="status" class="status"></span></div>
+  <div class="row"><button id="reload">Reload from sheet</button><a id="sheetlink" href="#" target="_blank" rel="noopener" style="display:none">Open Google Sheet</a><span id="status" class="status"></span></div>
   <div id="meals"></div>
 </section>
 
@@ -87,7 +87,7 @@ window.onerror=(msg,src,line)=>{document.body.insertAdjacentHTML('afterbegin',
 
 const SHEET_URL='https://docs.google.com/spreadsheets/d/e/2PACX-1vR8a2tUSBz0YwDhP-TTtSxfkeNoGG5LKassN-daKbDd2RQDUX4p38Yno6PaYYzLcVSAT_Bq95cWtiMR/pub?gid=0&single=true&output=csv';
 const STAPLES_URL='https://docs.google.com/spreadsheets/d/e/2PACX-1vR8a2tUSBz0YwDhP-TTtSxfkeNoGG5LKassN-daKbDd2RQDUX4p38Yno6PaYYzLcVSAT_Bq95cWtiMR/pub?gid=188738644&single=true&output=csv';
-
+const SHEET_EDIT_URL='https://docs.google.com/spreadsheets/d/13hRoqtHH3KLEAPcu1UomTvQtxSK7C-9tRimNdeOJnmE/edit?usp=sharing';
 // Names used in the Person column of the Meals tab, and shown as ticks in the planner.
 const PEOPLE=['John','Clare'];
 
@@ -173,7 +173,7 @@ function amountFor(ing,cell){
   if(!ing.person) return ing.qty*cell.who.length;
   return cell.who.includes(ing.person)?ing.qty:0;
 }
-
+if(SHEET_EDIT_URL){const a=$('sheetlink');a.href=SHEET_EDIT_URL;a.style.display='inline';}
 // An ingredient only needs a category once, anywhere in the sheet. First one found wins.
 function buildCats(){
   catMap=new Map();
