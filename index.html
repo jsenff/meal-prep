@@ -12,8 +12,9 @@
   section{margin-bottom:32px}
   input,select,button{padding:4px}
   .row{display:flex;gap:8px;margin:6px 0;align-items:center}
-  .multrow{display:flex;align-items:center;gap:6px;margin-top:4px;font-size:12px;color:#555}
-  .multrow input{width:70px}
+  .who{display:flex;gap:10px;margin-top:4px;font-size:12px;color:#555}
+  .who label{display:flex;align-items:center;gap:3px}
+  .who input{padding:0}
   .status{font-size:13px;color:#555}
   .status.err{color:#b00}
   .note{font-size:13px;color:#666}
@@ -43,7 +44,11 @@
   <div id="meals"></div>
 </section>
 
-<section><h2>Week plan</h2><div id="plan"></div></section>
+<section>
+  <h2>Week plan</h2>
+  <div class="note">Tick who is eating each meal. Shared ingredients scale with the number of people ticked. Ingredients with a Person set in the sheet only count when that person is ticked. For extra lunches, plan them as their own Lunch or Dinner cell.</div>
+  <div id="plan"></div>
+</section>
 <section><h2>Batch cook</h2><div id="cook"></div></section>
 
 <section>
@@ -66,9 +71,10 @@ window.onerror=(msg,src,line)=>{document.body.insertAdjacentHTML('afterbegin',
   `<pre style="color:#b00">Error: ${msg} (line ${line})</pre>`);};
 
 const SHEET_URL='https://docs.google.com/spreadsheets/d/e/2PACX-1vR8a2tUSBz0YwDhP-TTtSxfkeNoGG5LKassN-daKbDd2RQDUX4p38Yno6PaYYzLcVSAT_Bq95cWtiMR/pub?gid=0&single=true&output=csv';
-
-// Paste the published CSV link for the Staples tab between the quotes. Leave empty to switch staples off.
 const STAPLES_URL='https://docs.google.com/spreadsheets/d/e/2PACX-1vR8a2tUSBz0YwDhP-TTtSxfkeNoGG5LKassN-daKbDd2RQDUX4p38Yno6PaYYzLcVSAT_Bq95cWtiMR/pub?gid=188738644&single=true&output=csv';
+
+// Names used in the Person column of the Meals tab, and shown as ticks in the planner.
+const PEOPLE=['John','Clare'];
 
 const DAYS=['Monday','Tuesday','Wednesday','Thursday','Friday','Saturday','Sunday'];
 const SLOTS=['Lunch','Dinner'];
@@ -79,11 +85,12 @@ const COOKS=[
   {name:'Saturday cook', days:['Sunday','Monday','Tuesday','Wednesday']}
 ];
 
-// Order categories appear on the shopping list (roughly your walk round the shop).
+// Order categories appear on the shopping list and cook cards (roughly your walk round the shop).
 // Names are matched ignoring case. Categories not listed come next in alphabetical order, then Other.
 const CATEGORY_ORDER=['Produce','Bakery','Meat and fish','Dairy and eggs','Tins and jars','Dry goods','Frozen'];
 
-// Accepts current and older saved formats. Plan cells become {meal: name, mult}.
+// Accepts current and older saved formats. Plan cells become {meal: name, who: [names eating]}.
+// Older cells (with a multiplier) default to everyone eating.
 function migrate(s){
   s=s||{};
   const oldNames={};
@@ -92,12 +99,16 @@ function migrate(s){
   for(const [k,v] of Object.entries(s.plan||{})){
     const slot=k.split('|')[1];
     if(!SLOTS.includes(slot)) continue;
-    let name=null, mult=1;
+    let name=null, who=PEOPLE.slice();
     if(typeof v==='string') name=oldNames[v];
-    else if(v){name=v.meal||oldNames[v.id]; mult=v.mult>0?v.mult:1;}
-    if(name) plan[k]={meal:name,mult};
+    else if(v){
+      name=v.meal||oldNames[v.id];
+      if(Array.isArray(v.who)) who=PEOPLE.filter(p=>v.who.includes(p));
+    }
+    if(name) plan[k]={meal:name,who};
   }
-  const meals=(s.meals||[]).map(m=>({name:m.name,ingredients:m.ingredients||[]}));
+  const meals=(s.meals||[]).map(m=>({name:m.name,
+    ingredients:(m.ingredients||[]).map(i=>({...i,person:i.person||''}))}));
   return {plan,meals,staples:s.staples||[],ticked:s.ticked||{},skipStaples:s.skipStaples||{}};
 }
 
@@ -118,12 +129,38 @@ const persist=()=>localStorage.setItem('mealprep',JSON.stringify(
   {plan:state.plan,ticked:state.ticked,skipStaples:state.skipStaples,meals,staples}));
 const save=()=>{persist();render();};
 
+// How much of an ingredient one planner cell needs.
+// Shared ingredients (no person) are per person, so they scale with how many are eating.
+// Person-specific ingredients count only if that person is ticked.
+function amountFor(ing,cell){
+  if(!ing.person) return ing.qty*cell.who.length;
+  return cell.who.includes(ing.person)?ing.qty:0;
+}
+
 // An ingredient only needs a category once, anywhere in the sheet. First one found wins.
 function buildCats(){
   catMap=new Map();
   const put=(n,c)=>{ if(!c) return; const k=String(n).trim().toLowerCase(); if(!catMap.has(k)) catMap.set(k,c); };
   for(const m of meals) for(const i of m.ingredients) put(i.name,i.cat);
   for(const s of staples) put(s.name,s.cat);
+}
+
+// Groups rows by category in shop-walk order. Returns [{label, rows}].
+function groupByCategory(rows){
+  const groups=new Map();
+  for(const r of rows){
+    const c=catMap.get(r.name.toLowerCase())||'';
+    const gk=c?c.toLowerCase():'\uffff';
+    if(!groups.has(gk)) groups.set(gk,{label:c||'Other',rows:[]});
+    groups.get(gk).rows.push(r);
+  }
+  const rank=gk=>{
+    if(gk==='\uffff') return 1e6;
+    const i=CATEGORY_ORDER.findIndex(x=>x.toLowerCase()===gk);
+    return i>=0?i:1000;
+  };
+  return [...groups.keys()].sort((a,b)=>rank(a)-rank(b)||a.localeCompare(b))
+    .map(gk=>{const g=groups.get(gk); g.rows.sort((a,b)=>a.name.localeCompare(b.name)); return g;});
 }
 
 function parseCSV(t){
@@ -144,11 +181,11 @@ function parseCSV(t){
   return rows;
 }
 
-// Meals tab columns: Meal, Ingredient, Qty, Unit, Category (optional)
+// Meals tab columns: Meal, Ingredient, Qty, Unit, Category (optional), Person (optional)
 function parseMeals(text){
   const rows=parseCSV(text);
   if(rows.length&&String(rows[0][0]).trim().toLowerCase()==='meal') rows.shift();
-  const map=new Map(); let skipped=0;
+  const map=new Map(); let skipped=0; const bad=new Set();
   for(const r of rows){
     if(r.every(x=>String(x).trim()==='')) continue;
     const name=String(r[0]||'').trim();
@@ -156,12 +193,18 @@ function parseMeals(text){
     const qty=parseFloat(r[2]);
     const unit=String(r[3]||'').trim().toLowerCase();
     const cat=String(r[4]||'').trim();
+    const rawPerson=String(r[5]||'').trim();
+    let person='';
+    if(rawPerson){
+      person=PEOPLE.find(p=>p.toLowerCase()===rawPerson.toLowerCase())||'';
+      if(!person){bad.add(rawPerson);skipped++;continue;}
+    }
     if(!name||!ing||!(qty>0)||!unit){skipped++;continue;}
     const key=name.toLowerCase();
     if(!map.has(key)) map.set(key,{name,ingredients:[]});
-    map.get(key).ingredients.push({name:ing,qty,unit,cat});
+    map.get(key).ingredients.push({name:ing,qty,unit,cat,person});
   }
-  return {meals:[...map.values()],skipped};
+  return {meals:[...map.values()],skipped,bad:[...bad]};
 }
 
 // Staples tab columns: Item, Qty, Unit, Category (optional)
@@ -191,9 +234,11 @@ async function loadSheet(){
   statusMsg='Loading from sheet...'; statusErr=false; renderStatus();
   const parts=[]; let err=false;
   try{
-    const {meals:m,skipped}=parseMeals(await fetchCSV(SHEET_URL));
+    const {meals:m,skipped,bad}=parseMeals(await fetchCSV(SHEET_URL));
     meals=m;
-    parts.push(m.length?`${m.length} meals`+(skipped?` (${skipped} row(s) skipped)`:''):'no meals in the sheet yet');
+    let txt=m.length?`${m.length} meals`:'no meals in the sheet yet';
+    if(skipped) txt+=` (${skipped} row(s) skipped`+(bad.length?`, unrecognised Person: ${bad.join(', ')}`:'')+')';
+    parts.push(txt);
   }catch(e){err=true;parts.push(`meals failed to load (${e.message}), using last saved copy`);}
   if(STAPLES_URL){
     try{
@@ -217,7 +262,10 @@ function renderMeals(){
   $('meals').innerHTML=meals.length?meals.map(m=>`
     <details>
       <summary><b>${esc(m.name)}</b> (${m.ingredients.length} ingredients)</summary>
-      <ul>${m.ingredients.map(i=>`<li>${esc(i.name)}: ${fmt(i.qty,i.unit)}${i.cat?` <span class="gray">${esc(i.cat)}</span>`:''}</li>`).join('')}</ul>
+      <ul>${m.ingredients.map(i=>{
+        const tag=[i.cat,i.person].filter(Boolean).join(', ');
+        return `<li>${esc(i.name)}: ${fmt(i.qty,i.unit)}${tag?` <span class="gray">${esc(tag)}</span>`:''}</li>`;
+      }).join('')}</ul>
     </details>`).join(''):'<p>No meals loaded.</p>';
 }
 
@@ -234,57 +282,48 @@ function renderPlan(){
       const missing=cell&&!getMeal(cell.meal);
       return `<td>
         <select data-day="${d}" data-slot="${s}">${opts(cell&&cell.meal)}</select>
-        ${cell?`<div class="multrow">x
-          <input class="mult" type="number" min="0.5" step="0.5" value="${cell.mult}"
-                 data-day="${d}" data-slot="${s}"></div>`:''}
+        ${cell?`<div class="who">${PEOPLE.map(p=>
+          `<label><input type="checkbox" data-day="${d}" data-slot="${s}" data-who="${esc(p)}"${cell.who.includes(p)?' checked':''}> ${esc(p)}</label>`).join('')}</div>`:''}
         ${missing?'<div class="warn">Not in sheet, ignored in totals</div>':''}
+        ${cell&&!cell.who.length?'<div class="warn">Nobody ticked, ignored in totals</div>':''}
       </td>`;
     }).join('')+'</tr>').join('')+
     '</table>';
 }
-// Groups rows by category in shop-walk order. Returns [{label, rows}].
-function groupByCategory(rows){
-  const groups=new Map();
-  for(const r of rows){
-    const c=catMap.get(r.name.toLowerCase())||'';
-    const gk=c?c.toLowerCase():'\uffff';
-    if(!groups.has(gk)) groups.set(gk,{label:c||'Other',rows:[]});
-    groups.get(gk).rows.push(r);
-  }
-  const rank=gk=>{
-    if(gk==='\uffff') return 1e6;
-    const i=CATEGORY_ORDER.findIndex(x=>x.toLowerCase()===gk);
-    return i>=0?i:1000;
-  };
-  return [...groups.keys()].sort((a,b)=>rank(a)-rank(b)||a.localeCompare(b))
-    .map(gk=>{const g=groups.get(gk); g.rows.sort((a,b)=>a.name.localeCompare(b.name)); return g;});
+
+function eatenLabel(d,s,cell){
+  const t=d.slice(0,3)+' '+s.toLowerCase();
+  return cell.who.length===PEOPLE.length?t:`${t} (${cell.who.join(', ')} only)`;
 }
+
 function renderCook(){
   $('cook').innerHTML='<div class="cooks">'+COOKS.map(c=>{
     const dishes=new Map();
     const totals=new Map();
 
     for(const d of c.days) for(const s of SLOTS){
-      const cell=state.plan[d+'|'+s]; if(!cell) continue;
+      const cell=state.plan[d+'|'+s]; if(!cell||!cell.who.length) continue;
       const m=getMeal(cell.meal); if(!m) continue;
       const key=m.name.toLowerCase();
-      if(!dishes.has(key)) dishes.set(key,{name:m.name,portions:0,eat:[],meal:m});
+      if(!dishes.has(key)) dishes.set(key,{name:m.name,portions:0,eat:[],meal:m,amounts:new Map()});
       const dish=dishes.get(key);
-      dish.portions+=cell.mult;
-      dish.eat.push(d.slice(0,3)+' '+s.toLowerCase()+(cell.mult!==1?` (x${cell.mult})`:''));
-      for(const i of m.ingredients){
+      dish.portions+=cell.who.length;
+      dish.eat.push(eatenLabel(d,s,cell));
+      m.ingredients.forEach((i,ix)=>{
+        const a=amountFor(i,cell); if(!a) return;
+        dish.amounts.set(ix,(dish.amounts.get(ix)||0)+a);
         const k=skey(i.name,i.unit);
         if(!totals.has(k)) totals.set(k,{name:i.name.trim(),unit:i.unit,qty:0});
-        totals.get(k).qty+=i.qty*cell.mult;
-      }
+        totals.get(k).qty+=a;
+      });
     }
 
     const dishHtml=[...dishes.values()].map(dish=>`
       <div class="dish">
-        <div class="title">Cook ${+dish.portions.toFixed(2)} x ${esc(dish.name)}</div>
-        <div class="eat">Eaten: ${dish.eat.join(', ')}</div>
-        <ul>${dish.meal.ingredients.map(i=>
-          `<li>${esc(i.name)}: ${fmt(i.qty*dish.portions,i.unit)}</li>`).join('')}</ul>
+        <div class="title">Cook ${esc(dish.name)} (${dish.portions} portion${dish.portions===1?'':'s'})</div>
+        <div class="eat">Eaten: ${dish.eat.map(esc).join(', ')}</div>
+        <ul>${dish.meal.ingredients.map((i,ix)=>dish.amounts.has(ix)
+          ?`<li>${esc(i.name)}${i.person?` (${esc(i.person)})`:''}: ${fmt(dish.amounts.get(ix),i.unit)}</li>`:'').join('')}</ul>
       </div>`).join('');
 
     const rows=[...totals.values()];
@@ -326,7 +365,10 @@ function shopTotals(){
   };
   for(const cell of Object.values(state.plan)){
     const m=getMeal(cell.meal); if(!m) continue;
-    for(const i of m.ingredients) add(i.name,i.unit,i.qty*cell.mult);
+    for(const i of m.ingredients){
+      const a=amountFor(i,cell);
+      if(a) add(i.name,i.unit,a);
+    }
   }
   for(const s of staples){
     if(state.skipStaples[skey(s.name,s.unit)]) continue;
@@ -342,26 +384,10 @@ function renderShop(){
     $('tickinfo').textContent='';
     return;
   }
-  const groups=new Map(); let uncat=0;
-  for(const r of rows){
-    const c=catMap.get(r.name.toLowerCase())||'';
-    if(!c) uncat++;
-    const gk=c?c.toLowerCase():'\uffff';
-    if(!groups.has(gk)) groups.set(gk,{label:c||'Other',rows:[]});
-    groups.get(gk).rows.push(r);
-  }
-  const rank=gk=>{
-    if(gk==='\uffff') return 1e6;
-    const i=CATEGORY_ORDER.findIndex(x=>x.toLowerCase()===gk);
-    return i>=0?i:1000;
-  };
-  const keys=[...groups.keys()].sort((a,b)=>rank(a)-rank(b)||a.localeCompare(b));
-
+  const uncat=rows.filter(r=>!catMap.get(r.name.toLowerCase())).length;
   let html='<table><tr><th class="tickcol"></th><th>Item</th><th>Total</th></tr>';
-  for(const gk of keys){
-    const g=groups.get(gk);
+  for(const g of groupByCategory(rows)){
     html+=`<tr class="cat"><td colspan="3">${esc(g.label)}</td></tr>`;
-    g.rows.sort((a,b)=>a.name.localeCompare(b.name));
     for(const r of g.rows){
       const done=!!state.ticked[r.key];
       html+=`<tr class="${done?'done':''}">
@@ -393,12 +419,12 @@ document.addEventListener('change',e=>{
   }
   if(!d.day) return;
   const k=d.day+'|'+d.slot;
-  if(t.classList.contains('mult')){
-    const v=parseFloat(t.value);
-    if(state.plan[k]) state.plan[k].mult=v>0?v:1;
+  if(d.who!==undefined){
+    const cell=state.plan[k]; if(!cell) return;
+    cell.who=PEOPLE.filter(p=>p===d.who?t.checked:cell.who.includes(p));
   } else if(t.value){
     const prev=state.plan[k];
-    state.plan[k]={meal:t.value,mult:prev?prev.mult:1};
+    state.plan[k]={meal:t.value,who:prev?prev.who:PEOPLE.slice()};
   } else {
     delete state.plan[k];
   }
