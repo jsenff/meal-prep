@@ -8,6 +8,10 @@
   table{border-collapse:collapse;width:100%}
   th,td{border:1px solid #ccc;padding:4px 6px;font-size:14px;vertical-align:top}
   th{background:#f3f3f3}
+  th,td{transition:opacity .2s,background .2s}
+  th.dayon{background:#e2eddb}
+  td.dayon{background:#f3f8ef}
+  .dayoff{opacity:.5;filter:grayscale(1)}
   select{width:100%}
   section{margin-bottom:32px}
   input,select,button{padding:4px}
@@ -19,8 +23,16 @@
   .status.err{color:#b00}
   .note{font-size:13px;color:#666}
   .warn{color:#b60;font-size:12px;margin-top:4px}
+  .cookinfo{font-size:13px;color:#666;margin-bottom:10px}
+  .cookinfo button{padding:1px 6px;font-size:12px;margin-left:6px}
   .cooks{display:flex;gap:24px;flex-wrap:wrap}
-  .cook{flex:1;min-width:380px;border:1px solid #ccc;border-radius:6px;padding:12px 16px}
+  .cook{flex:1;min-width:380px;border:1px solid #ccc;border-radius:6px;padding:12px 16px;
+        transition:opacity .2s,filter .2s,background .2s}
+  .cook.active{background:#f3f8ef;border-color:#9bc58a;box-shadow:0 0 0 2px #e2eddb}
+  .cook.faded{opacity:.5;filter:grayscale(1)}
+  .cookhead{display:flex;justify-content:space-between;align-items:flex-start;gap:12px}
+  .cookpick{display:flex;align-items:center;gap:5px;font-size:13px;color:#444;white-space:nowrap}
+  .cookpick input{padding:0}
   .cook h3{margin:0 0 2px}
   .cook .sub{color:#666;font-size:13px;margin-bottom:10px}
   .dish{margin:10px 0;padding-bottom:8px;border-bottom:1px dashed #ddd}
@@ -79,10 +91,11 @@ const PEOPLE=['John','Clare'];
 const DAYS=['Monday','Tuesday','Wednesday','Thursday','Friday','Saturday','Sunday'];
 const SLOTS=['Lunch','Dinner'];
 
-// Which plan days each cooking session covers. Edit here to change the schedule.
+// Each cooking session: "on" is the weekday you normally cook (selected automatically that day),
+// "days" are the plan days it covers. Day names must match DAYS exactly.
 const COOKS=[
-  {name:'Tuesday cook',  days:['Thursday','Friday','Saturday']},
-  {name:'Saturday cook', days:['Sunday','Monday','Tuesday','Wednesday']}
+  {name:'Tuesday cook',  on:'Tuesday',  days:['Thursday','Friday','Saturday']},
+  {name:'Saturday cook', on:'Saturday', days:['Sunday','Monday','Tuesday','Wednesday']}
 ];
 
 // Order categories appear on the shopping list and cook cards (roughly your walk round the shop).
@@ -109,14 +122,17 @@ function migrate(s){
   }
   const meals=(s.meals||[]).map(m=>({name:m.name,
     ingredients:(m.ingredients||[]).map(i=>({...i,person:i.person||''}))}));
-  return {plan,meals,staples:s.staples||[],ticked:s.ticked||{},skipStaples:s.skipStaples||{}};
+  const o=s.cookOverride;
+  const cookOverride=(o&&typeof o.date==='string'&&typeof o.name==='string')?{date:o.date,name:o.name}:null;
+  return {plan,meals,staples:s.staples||[],ticked:s.ticked||{},skipStaples:s.skipStaples||{},cookOverride};
 }
 
-let state={plan:{},ticked:{},skipStaples:{}}, meals=[], staples=[], catMap=new Map();
+let state={plan:{},ticked:{},skipStaples:{},cookOverride:null}, meals=[], staples=[], catMap=new Map();
 let statusMsg='', statusErr=false;
 try{
   const saved=migrate(JSON.parse(localStorage.getItem('mealprep')||'null'));
   state.plan=saved.plan; state.ticked=saved.ticked; state.skipStaples=saved.skipStaples;
+  state.cookOverride=saved.cookOverride;
   meals=saved.meals; staples=saved.staples;
 }catch(err){}
 
@@ -126,8 +142,26 @@ const fmt=(q,u)=>`${+q.toFixed(2)} ${esc(u)}`;
 const skey=(n,u)=>String(n).trim().toLowerCase()+'|'+u;
 const getMeal=name=>meals.find(m=>m.name.toLowerCase()===String(name).toLowerCase());
 const persist=()=>localStorage.setItem('mealprep',JSON.stringify(
-  {plan:state.plan,ticked:state.ticked,skipStaples:state.skipStaples,meals,staples}));
+  {plan:state.plan,ticked:state.ticked,skipStaples:state.skipStaples,cookOverride:state.cookOverride,meals,staples}));
 const save=()=>{persist();render();};
+
+// Today's date (local time) and weekday name, used for the automatic cook selection.
+const todayStr=()=>{
+  const d=new Date();
+  return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');
+};
+const todayName=()=>DAYS[(new Date().getDay()+6)%7];
+
+// A manual choice only lasts for the day it was made, then it reverts to automatic.
+const overrideActive=()=>!!(state.cookOverride&&state.cookOverride.date===todayStr());
+
+// Name of the cook currently selected, or '' for none.
+function currentCook(){
+  const name=overrideActive()
+    ?state.cookOverride.name
+    :((COOKS.find(c=>c.on===todayName())||{}).name||'');
+  return COOKS.some(c=>c.name===name)?name:'';
+}
 
 // How much of an ingredient one planner cell needs.
 // Shared ingredients (no person) are per person, so they scale with how many are eating.
@@ -270,17 +304,20 @@ function renderMeals(){
 }
 
 function renderPlan(){
+  // Days covered by the selected cook are tinted, the rest fade. With no cook selected, nothing changes.
+  const cc=COOKS.find(c=>c.name===currentCook());
+  const dayCls=d=>cc?(cc.days.includes(d)?'dayon':'dayoff'):'';
   const opts=sel=>{
     const known=sel&&getMeal(sel);
     return '<option value="">-</option>'
       +(sel&&!known?`<option value="${esc(sel)}" selected>${esc(sel)} (not in sheet)</option>`:'')
       +meals.map(m=>`<option value="${esc(m.name)}"${known&&m.name.toLowerCase()===sel.toLowerCase()?' selected':''}>${esc(m.name)}</option>`).join('');
   };
-  $('plan').innerHTML='<table><tr><th></th>'+DAYS.map(d=>`<th>${d}</th>`).join('')+'</tr>'+
+  $('plan').innerHTML='<table><tr><th></th>'+DAYS.map(d=>`<th class="${dayCls(d)}">${d}</th>`).join('')+'</tr>'+
     SLOTS.map(s=>`<tr><th>${s}</th>`+DAYS.map(d=>{
       const cell=state.plan[d+'|'+s];
       const missing=cell&&!getMeal(cell.meal);
-      return `<td>
+      return `<td class="${dayCls(d)}">
         <select data-day="${d}" data-slot="${s}">${opts(cell&&cell.meal)}</select>
         ${cell?`<div class="who">${PEOPLE.map(p=>
           `<label><input type="checkbox" data-day="${d}" data-slot="${s}" data-who="${esc(p)}"${cell.who.includes(p)?' checked':''}> ${esc(p)}</label>`).join('')}</div>`:''}
@@ -297,7 +334,17 @@ function eatenLabel(d,s,cell){
 }
 
 function renderCook(){
-  $('cook').innerHTML='<div class="cooks">'+COOKS.map(c=>{
+  const cur=currentCook();
+  const manual=overrideActive();
+  const today=todayName();
+  const autoCook=COOKS.find(c=>c.on===today);
+
+  let info;
+  if(manual) info=`Selection set manually for today. <button data-cookauto="1">Back to automatic</button>`;
+  else if(autoCook) info=`Today is ${today}, so the ${esc(autoCook.name)} is selected automatically. Untick it, or tick the other card, to override.`;
+  else info=`Today is ${today}, which is not a cook day. Tick a card if you are cooking off schedule.`;
+
+  $('cook').innerHTML=`<div class="cookinfo">${info}</div><div class="cooks">`+COOKS.map(c=>{
     const dishes=new Map();
     const totals=new Map();
 
@@ -333,9 +380,16 @@ function renderCook(){
         `<tr class="cat"><td colspan="2">${esc(g.label)}</td></tr>`+g.rows.map(r=>
           `<tr><td>${esc(r.name)}</td><td>${fmt(r.qty,r.unit)}</td></tr>`).join('')).join('')}</table>`:'';
 
-    return `<div class="cook">
-      <h3>${esc(c.name)}</h3>
-      <div class="sub">Covers: ${c.days.join(', ')}</div>
+    const active=cur===c.name;
+    const faded=!!cur&&!active;
+    return `<div class="cook${active?' active':''}${faded?' faded':''}">
+      <div class="cookhead">
+        <div>
+          <h3>${esc(c.name)}</h3>
+          <div class="sub">Covers: ${c.days.join(', ')}</div>
+        </div>
+        <label class="cookpick"><input type="checkbox" data-cook="${esc(c.name)}"${active?' checked':''}> Cooking today${active&&!manual?' <span class="gray">(auto)</span>':''}</label>
+      </div>
       ${dishHtml||'<p>Nothing planned for these days.</p>'}
       ${totalHtml}
     </div>`;
@@ -407,6 +461,12 @@ function render(){renderStatus();renderMeals();renderPlan();renderCook();renderS
 $('reload').onclick=loadSheet;
 $('clearTicks').onclick=()=>{state.ticked={};save();};
 
+document.addEventListener('click',e=>{
+  if(e.target.dataset&&e.target.dataset.cookauto){
+    state.cookOverride=null; save();
+  }
+});
+
 document.addEventListener('change',e=>{
   const t=e.target, d=t.dataset;
   if(d.tick!==undefined){
@@ -415,6 +475,10 @@ document.addEventListener('change',e=>{
   }
   if(d.staple!==undefined){
     if(t.checked) delete state.skipStaples[d.staple]; else state.skipStaples[d.staple]=true;
+    save(); return;
+  }
+  if(d.cook!==undefined){
+    state.cookOverride={date:todayStr(),name:t.checked?d.cook:''};
     save(); return;
   }
   if(!d.day) return;
