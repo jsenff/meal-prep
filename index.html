@@ -407,10 +407,11 @@ function renderStaples(){
       :'<p class="note">Staples are not connected yet. Paste the published Staples CSV link into STAPLES_URL near the top of the file.</p>';
     return;
   }
-  el.innerHTML='<div class="staplelist">'+staples.map(s=>{
-    const k=skey(s.name,s.unit);
-    return `<label><input type="checkbox" data-staple="${esc(k)}"${state.skipStaples[k]?'':' checked'}> ${esc(s.name)} (${fmt(s.qty,s.unit)})</label>`;
-  }).join('')+'</div>';
+  el.innerHTML='<div class="row"><button data-staplesall="on">Tick all</button><button data-staplesall="off">Untick all</button></div>'
+    +'<div class="staplelist">'+staples.map(s=>{
+      const k=skey(s.name,s.unit);
+      return `<label><input type="checkbox" data-staple="${esc(k)}"${state.skipStaples[k]?'':' checked'}> ${esc(s.name)} (${fmt(s.qty,s.unit)})</label>`;
+    }).join('')+'</div>';
 }
 
 function shopTotals(){
@@ -465,8 +466,14 @@ $('reload').onclick=loadSheet;
 $('clearTicks').onclick=()=>{state.ticked={};save();};
 
 document.addEventListener('click',e=>{
-  if(e.target.dataset&&e.target.dataset.cookauto){
+  const d=e.target.dataset||{};
+  if(d.cookauto){
     state.cookOverride=null; save();
+  }
+  if(d.staplesall){
+    state.skipStaples={};
+    if(d.staplesall==='off') for(const s of staples) state.skipStaples[skey(s.name,s.unit)]=true;
+    save();
   }
 });
 
