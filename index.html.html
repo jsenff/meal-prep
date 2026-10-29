@@ -1,0 +1,279 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Meal Prep</title>
+<style>
+  body{font-family:system-ui,sans-serif;margin:24px;max-width:1300px}
+  table{border-collapse:collapse;width:100%}
+  th,td{border:1px solid #ccc;padding:4px 6px;font-size:14px;vertical-align:top}
+  th{background:#f3f3f3}
+  select{width:100%}
+  section{margin-bottom:32px}
+  input,select,button{padding:4px}
+  .row{display:flex;gap:8px;margin:6px 0;align-items:center}
+  .multrow{display:flex;align-items:center;gap:6px;margin-top:4px;font-size:12px;color:#555}
+  .multrow input{width:70px}
+  .status{font-size:13px;color:#555}
+  .status.err{color:#b00}
+  .warn{color:#b60;font-size:12px;margin-top:4px}
+  .cooks{display:flex;gap:24px;flex-wrap:wrap}
+  .cook{flex:1;min-width:380px;border:1px solid #ccc;border-radius:6px;padding:12px 16px}
+  .cook h3{margin:0 0 2px}
+  .cook .sub{color:#666;font-size:13px;margin-bottom:10px}
+  .dish{margin:10px 0;padding-bottom:8px;border-bottom:1px dashed #ddd}
+  .dish .title{font-weight:600}
+  .dish .eat{color:#666;font-size:13px}
+  .dish ul{margin:4px 0 0 18px;padding:0;font-size:14px}
+  details{margin-bottom:6px}
+</style>
+</head>
+<body>
+<h1>Meal Prep</h1>
+
+<section>
+  <h2>Meal library</h2>
+  <div class="row"><button id="reload">Reload from sheet</button><span id="status" class="status"></span></div>
+  <div id="meals"></div>
+</section>
+
+<section><h2>Week plan</h2><div id="plan"></div></section>
+<section><h2>Batch cook</h2><div id="cook"></div></section>
+<section><h2>Shopping list</h2><div id="shop"></div></section>
+
+<section>
+  <button id="exp">Export plan JSON</button>
+  <input type="file" id="imp" accept=".json">
+</section>
+
+<script>
+window.onerror=(msg,src,line)=>{document.body.insertAdjacentHTML('afterbegin',
+  `<pre style="color:#b00">Error: ${msg} (line ${line})</pre>`);};
+
+const SHEET_URL='https://docs.google.com/spreadsheets/d/e/2PACX-1vR8a2tUSBz0YwDhP-TTtSxfkeNoGG5LKassN-daKbDd2RQDUX4p38Yno6PaYYzLcVSAT_Bq95cWtiMR/pub?gid=0&single=true&output=csv';
+
+const DAYS=['Monday','Tuesday','Wednesday','Thursday','Friday','Saturday','Sunday'];
+const SLOTS=['Lunch','Dinner'];
+
+// Which plan days each cooking session covers. Edit here to change the schedule.
+const COOKS=[
+  {name:'Tuesday cook',  days:['Thursday','Friday','Saturday']},
+  {name:'Saturday cook', days:['Sunday','Monday','Tuesday','Wednesday']}
+];
+
+// Accepts current and older saved formats. Plan cells become {meal: name, mult}.
+function migrate(s){
+  s=s||{};
+  const oldNames={};
+  for(const m of (s.meals||[])) if(m.id) oldNames[m.id]=m.name;
+  const plan={};
+  for(const [k,v] of Object.entries(s.plan||{})){
+    const slot=k.split('|')[1];
+    if(!SLOTS.includes(slot)) continue;
+    let name=null, mult=1;
+    if(typeof v==='string') name=oldNames[v];
+    else if(v){name=v.meal||oldNames[v.id]; mult=v.mult>0?v.mult:1;}
+    if(name) plan[k]={meal:name,mult};
+  }
+  const meals=(s.meals||[]).map(m=>({name:m.name,ingredients:m.ingredients||[]}));
+  return {plan,meals};
+}
+
+let state={plan:{}}, meals=[], statusMsg='', statusErr=false;
+try{
+  const saved=migrate(JSON.parse(localStorage.getItem('mealprep')||'null'));
+  state.plan=saved.plan; meals=saved.meals;
+}catch(err){}
+
+const $=id=>document.getElementById(id);
+const esc=s=>String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const fmt=(q,u)=>`${+q.toFixed(2)} ${esc(u)}`;
+const getMeal=name=>meals.find(m=>m.name.toLowerCase()===String(name).toLowerCase());
+const persist=()=>localStorage.setItem('mealprep',JSON.stringify({plan:state.plan,meals}));
+const save=()=>{persist();render();};
+
+function parseCSV(t){
+  const rows=[]; let row=[], f='', q=false;
+  for(let i=0;i<t.length;i++){
+    const c=t[i];
+    if(q){
+      if(c==='"'){ if(t[i+1]==='"'){f+='"';i++;} else q=false; }
+      else f+=c;
+    } else if(c==='"') q=true;
+    else if(c===','){row.push(f);f='';}
+    else if(c==='\n'||c==='\r'){
+      if(c==='\r'&&t[i+1]==='\n') i++;
+      row.push(f);f='';rows.push(row);row=[];
+    } else f+=c;
+  }
+  if(f!==''||row.length){row.push(f);rows.push(row);}
+  return rows;
+}
+
+function parseMeals(text){
+  const rows=parseCSV(text);
+  if(rows.length&&String(rows[0][0]).trim().toLowerCase()==='meal') rows.shift();
+  const map=new Map(); let skipped=0;
+  for(const r of rows){
+    if(r.every(x=>String(x).trim()==='')) continue;
+    const name=String(r[0]||'').trim();
+    const ing=String(r[1]||'').trim();
+    const qty=parseFloat(r[2]);
+    const unit=String(r[3]||'').trim().toLowerCase();
+    if(!name||!ing||!(qty>0)||!unit){skipped++;continue;}
+    const key=name.toLowerCase();
+    if(!map.has(key)) map.set(key,{name,ingredients:[]});
+    map.get(key).ingredients.push({name:ing,qty,unit});
+  }
+  return {meals:[...map.values()],skipped};
+}
+
+async function loadSheet(){
+  statusMsg='Loading from sheet...'; statusErr=false; renderStatus();
+  try{
+    const res=await fetch(SHEET_URL+'&_='+Date.now(),{cache:'no-store'});
+    if(!res.ok) throw new Error('HTTP '+res.status);
+    const {meals:m,skipped}=parseMeals(await res.text());
+    meals=m; persist();
+    const time=new Date().toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'});
+    statusMsg=m.length
+      ?`Loaded ${m.length} meals at ${time}`+(skipped?`. ${skipped} row(s) skipped (missing meal, ingredient, qty or unit).`:'')
+      :'The sheet has no meals yet. Add rows (Meal, Ingredient, Qty, Unit), wait a few minutes for the published copy to update, then reload.';
+  }catch(err){
+    statusErr=true;
+    statusMsg=`Could not load the sheet (${err.message}). Showing the last saved copy.`;
+  }
+  render();
+}
+
+function renderStatus(){
+  const s=$('status'); s.textContent=statusMsg; s.className='status'+(statusErr?' err':'');
+}
+
+function renderMeals(){
+  $('meals').innerHTML=meals.length?meals.map(m=>`
+    <details>
+      <summary><b>${esc(m.name)}</b> (${m.ingredients.length} ingredients)</summary>
+      <ul>${m.ingredients.map(i=>`<li>${esc(i.name)}: ${fmt(i.qty,i.unit)}</li>`).join('')}</ul>
+    </details>`).join(''):'<p>No meals loaded.</p>';
+}
+
+function renderPlan(){
+  const opts=sel=>{
+    const known=sel&&getMeal(sel);
+    return '<option value="">-</option>'
+      +(sel&&!known?`<option value="${esc(sel)}" selected>${esc(sel)} (not in sheet)</option>`:'')
+      +meals.map(m=>`<option value="${esc(m.name)}"${known&&m.name.toLowerCase()===sel.toLowerCase()?' selected':''}>${esc(m.name)}</option>`).join('');
+  };
+  $('plan').innerHTML='<table><tr><th></th>'+DAYS.map(d=>`<th>${d}</th>`).join('')+'</tr>'+
+    SLOTS.map(s=>`<tr><th>${s}</th>`+DAYS.map(d=>{
+      const cell=state.plan[d+'|'+s];
+      const missing=cell&&!getMeal(cell.meal);
+      return `<td>
+        <select data-day="${d}" data-slot="${s}">${opts(cell&&cell.meal)}</select>
+        ${cell?`<div class="multrow">x
+          <input class="mult" type="number" min="0.5" step="0.5" value="${cell.mult}"
+                 data-day="${d}" data-slot="${s}"></div>`:''}
+        ${missing?'<div class="warn">Not in sheet, ignored in totals</div>':''}
+      </td>`;
+    }).join('')+'</tr>').join('')+
+    '</table>';
+}
+
+function renderCook(){
+  $('cook').innerHTML='<div class="cooks">'+COOKS.map(c=>{
+    const dishes=new Map();
+    const totals=new Map();
+
+    for(const d of c.days) for(const s of SLOTS){
+      const cell=state.plan[d+'|'+s]; if(!cell) continue;
+      const m=getMeal(cell.meal); if(!m) continue;
+      const key=m.name.toLowerCase();
+      if(!dishes.has(key)) dishes.set(key,{name:m.name,portions:0,eat:[],meal:m});
+      const dish=dishes.get(key);
+      dish.portions+=cell.mult;
+      dish.eat.push(d.slice(0,3)+' '+s.toLowerCase()+(cell.mult!==1?` (x${cell.mult})`:''));
+      for(const i of m.ingredients){
+        const k=i.name.trim().toLowerCase()+'|'+i.unit;
+        if(!totals.has(k)) totals.set(k,{name:i.name.trim(),unit:i.unit,qty:0});
+        totals.get(k).qty+=i.qty*cell.mult;
+      }
+    }
+
+    const dishHtml=[...dishes.values()].map(dish=>`
+      <div class="dish">
+        <div class="title">Cook ${+dish.portions.toFixed(2)} x ${esc(dish.name)}</div>
+        <div class="eat">Eaten: ${dish.eat.join(', ')}</div>
+        <ul>${dish.meal.ingredients.map(i=>
+          `<li>${esc(i.name)}: ${fmt(i.qty*dish.portions,i.unit)}</li>`).join('')}</ul>
+      </div>`).join('');
+
+    const rows=[...totals.values()].sort((a,b)=>a.name.localeCompare(b.name));
+    const totalHtml=rows.length?`
+      <b>Combined ingredients</b>
+      <table><tr><th>Item</th><th>Total</th></tr>${rows.map(r=>
+        `<tr><td>${esc(r.name)}</td><td>${fmt(r.qty,r.unit)}</td></tr>`).join('')}</table>`:'';
+
+    return `<div class="cook">
+      <h3>${esc(c.name)}</h3>
+      <div class="sub">Covers: ${c.days.join(', ')}</div>
+      ${dishHtml||'<p>Nothing planned for these days.</p>'}
+      ${totalHtml}
+    </div>`;
+  }).join('')+'</div>';
+}
+
+function renderShop(){
+  const totals={};
+  for(const cell of Object.values(state.plan)){
+    const m=getMeal(cell.meal); if(!m) continue;
+    for(const i of m.ingredients){
+      const k=i.name.trim().toLowerCase()+'|'+i.unit;
+      totals[k]=totals[k]||{name:i.name.trim(),unit:i.unit,qty:0};
+      totals[k].qty+=i.qty*cell.mult;
+    }
+  }
+  const rows=Object.values(totals).sort((a,b)=>a.name.localeCompare(b.name));
+  $('shop').innerHTML=rows.length
+    ?'<table><tr><th>Item</th><th>Total</th></tr>'+rows.map(r=>
+       `<tr><td>${esc(r.name)}</td><td>${fmt(r.qty,r.unit)}</td></tr>`).join('')+'</table>'
+    :'<p>Plan some meals to build the list.</p>';
+}
+
+function render(){renderStatus();renderMeals();renderPlan();renderCook();renderShop();}
+
+$('reload').onclick=loadSheet;
+
+document.addEventListener('change',e=>{
+  const t=e.target;
+  if(!t.dataset.day) return;
+  const k=t.dataset.day+'|'+t.dataset.slot;
+  if(t.classList.contains('mult')){
+    const v=parseFloat(t.value);
+    if(state.plan[k]) state.plan[k].mult=v>0?v:1;
+  } else if(t.value){
+    const prev=state.plan[k];
+    state.plan[k]={meal:t.value,mult:prev?prev.mult:1};
+  } else {
+    delete state.plan[k];
+  }
+  save();
+});
+
+$('exp').onclick=()=>{
+  const a=document.createElement('a');
+  a.href=URL.createObjectURL(new Blob([JSON.stringify({plan:state.plan},null,2)],{type:'application/json'}));
+  a.download='meal-plan.json'; a.click();
+};
+$('imp').onchange=e=>{
+  const f=e.target.files[0]; if(!f) return;
+  const r=new FileReader();
+  r.onload=()=>{try{state.plan=migrate(JSON.parse(r.result)).plan;save();}catch{alert('Invalid file');}};
+  r.readAsText(f);
+};
+
+render();
+loadSheet();
+</script>
+</body>
+</html>
