@@ -22,11 +22,12 @@
   .guestrow{margin-top:2px;font-size:12px;color:#555}
   .guestrow label{display:flex;align-items:center;gap:3px}
   .guestrow input{padding:0}
-  .weekhead{display:flex;align-items:center;gap:12px;margin:16px 0 6px}
+  .weekhead{display:flex;align-items:center;gap:12px;margin:16px 0 6px;flex-wrap:wrap}
   .weekhead h3{margin:0}
   .badge{font-size:12px;font-weight:normal;color:#4a7a3a;background:#e2eddb;border-radius:10px;padding:1px 8px}
-  .weekpick{display:flex;align-items:center;gap:16px;flex-wrap:wrap;padding:8px 12px;border:1px solid #9bc58a;
+  .weekpick{display:flex;align-items:center;gap:10px 32px;flex-wrap:wrap;padding:8px 12px;border:1px solid #9bc58a;
             background:#f3f8ef;border-radius:6px;font-size:14px}
+  .wpg{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
   .weekpick label{display:flex;align-items:center;gap:4px}
   .weekpick input{padding:0}
   .wk{font-size:16px;font-weight:normal;color:#4a7a3a}
@@ -62,7 +63,8 @@
   .staplelist label:hover{background:#f7f7f7}
   .staplelist label.off{color:#aaa}
   .staplelist input{padding:0;margin:0}
-  .staplelist .sq{color:#888;font-size:12px;white-space:nowrap}  .gray{color:#888;font-size:12px}
+  .staplelist .sq{color:#888;font-size:12px;white-space:nowrap}
+  .gray{color:#888;font-size:12px}
 </style>
 </head>
 <body>
@@ -124,11 +126,14 @@ const WEEKS=2;
 const DAYS=['Monday','Tuesday','Wednesday','Thursday','Friday','Saturday','Sunday'];
 const SLOTS=['Lunch','Dinner'];
 
-// Each cooking session: "on" is the weekday you normally cook (selected automatically that day),
-// "days" are the plan days it covers. Day names must match DAYS exactly.
+// Each cooking session:
+//   on:   the weekday you normally cook (selected automatically that day)
+//   days: the plan days it covers
+//   next: the days from "days" that belong to the FOLLOWING week when "Roll into the next week" is chosen
+// Day names must match DAYS exactly.
 const COOKS=[
-  {name:'Tuesday cook',  on:'Tuesday',  days:['Thursday','Friday','Saturday']},
-  {name:'Saturday cook', on:'Saturday', days:['Sunday','Monday','Tuesday','Wednesday']}
+  {name:'Tuesday cook',  on:'Tuesday',  days:['Thursday','Friday','Saturday'], next:[]},
+  {name:'Saturday cook', on:'Saturday', days:['Sunday','Monday','Tuesday','Wednesday'], next:['Monday','Tuesday','Wednesday']}
 ];
 
 // Order categories appear on the shopping list and cook cards (roughly your walk round the shop).
@@ -171,23 +176,24 @@ function migrate(s){
   const tickedW=perWeek(s.tickedW,s.ticked);
   const skipW=perWeek(s.skipW,s.skipStaples);
   const viewWeek=(Number.isInteger(s.viewWeek)&&s.viewWeek>=0&&s.viewWeek<WEEKS)?s.viewWeek:0;
+  const rolling=!!s.rolling;
   const meals=(s.meals||[]).map(m=>({name:m.name,
     ingredients:(m.ingredients||[]).map(i=>({...i,person:i.person||''}))}));
   const o=s.cookOverride;
   const cookOverride=(o&&typeof o.date==='string'&&typeof o.name==='string')?{date:o.date,name:o.name}:null;
-  return {weeks,meals,staples:s.staples||[],tickedW,skipW,viewWeek,cookOverride};
+  return {weeks,meals,staples:s.staples||[],tickedW,skipW,viewWeek,rolling,cookOverride};
 }
 
 let state={weeks:Array.from({length:WEEKS},()=>({})),
            tickedW:Array.from({length:WEEKS},()=>({})),
            skipW:Array.from({length:WEEKS},()=>({})),
-           viewWeek:0, cookOverride:null};
+           viewWeek:0, rolling:false, cookOverride:null};
 let meals=[], staples=[], catMap=new Map();
 let statusMsg='', statusErr=false;
 try{
   const saved=migrate(JSON.parse(localStorage.getItem('mealprep')||'null'));
   state.weeks=saved.weeks; state.tickedW=saved.tickedW; state.skipW=saved.skipW;
-  state.viewWeek=saved.viewWeek; state.cookOverride=saved.cookOverride;
+  state.viewWeek=saved.viewWeek; state.rolling=saved.rolling; state.cookOverride=saved.cookOverride;
   meals=saved.meals; staples=saved.staples;
 }catch(err){}
 
@@ -197,7 +203,7 @@ const fmt=(q,u)=>`${+q.toFixed(2)} ${esc(u)}`;
 const skey=(n,u)=>String(n).trim().toLowerCase()+'|'+u;
 const getMeal=name=>meals.find(m=>m.name.toLowerCase()===String(name).toLowerCase());
 const persist=()=>localStorage.setItem('mealprep',JSON.stringify(
-  {weeks:state.weeks,tickedW:state.tickedW,skipW:state.skipW,viewWeek:state.viewWeek,
+  {weeks:state.weeks,tickedW:state.tickedW,skipW:state.skipW,viewWeek:state.viewWeek,rolling:state.rolling,
    cookOverride:state.cookOverride,meals,staples}));
 const save=()=>{persist();render();};
 
@@ -205,6 +211,13 @@ const save=()=>{persist();render();};
 const viewPlan=()=>state.weeks[state.viewWeek];
 const viewTicks=()=>state.tickedW[state.viewWeek];
 const viewSkips=()=>state.skipW[state.viewWeek];
+
+// Which plan days a cook covers, as [{day, week}], when week v is the one being shown.
+// In rolling mode, the days listed in the cook's "next" belong to the following week.
+// With two weeks that wraps round, so Week 2 rolls into Week 1 (a repeating fortnight).
+function coverage(c,v){
+  return c.days.map(d=>({day:d,week:(state.rolling&&(c.next||[]).includes(d))?(v+1)%WEEKS:v}));
+}
 
 // Today's date (local time) and weekday name, used for the automatic cook selection.
 const todayStr=()=>{
@@ -377,8 +390,13 @@ function renderPlan(){
     +`Guests adds ${GUEST_COUNT} extra portions, made the ${GUEST_VERSION} way. `
     +'For extra lunches, plan them as their own Lunch or Dinner cell.';
 
-  // In the week shown below, days covered by the selected cook are tinted and the rest fade.
+  // Days covered by the selected cook are tinted and the other days in that week fade.
+  // A week the cook doesn't reach is left plain.
   const cc=COOKS.find(c=>c.name===currentCook());
+  const cov=cc?coverage(cc,state.viewWeek):[];
+  const covered=new Set(cov.map(x=>x.week+'|'+x.day));
+  const touched=new Set(cov.map(x=>x.week));
+
   const opts=sel=>{
     const known=sel&&getMeal(sel);
     return '<option value="">-</option>'
@@ -389,9 +407,9 @@ function renderPlan(){
   const weekHtml=w=>{
     const plan=state.weeks[w];
     const shown=w===state.viewWeek;
-    const dayCls=d=>(cc&&shown)?(cc.days.includes(d)?'dayon':'dayoff'):'';
+    const dayCls=d=>(cc&&touched.has(w))?(covered.has(w+'|'+d)?'dayon':'dayoff'):'';
     return `<div class="weekhead">
-        <h3>Week ${w+1}${shown?' <span class="badge">shown in batch cook and shopping list</span>':''}</h3>
+        <h3>Week ${w+1}${shown?' <span class="badge">shown in batch cook and shopping list</span>':''}${(!shown&&cc&&touched.has(w))?` <span class="badge">${esc(cc.name)} also covers days here</span>`:''}</h3>
         <button data-clearweek="${w}">Clear all</button>
       </div>`
       +'<table><tr><th></th>'+DAYS.map(d=>`<th class="${dayCls(d)}">${d}</th>`).join('')+'</tr>'
@@ -413,17 +431,23 @@ function renderPlan(){
 }
 
 function renderWeekPick(){
-  $('weekpick').innerHTML='<div class="weekpick"><b>Show in batch cook and shopping list:</b>'
+  $('weekpick').innerHTML='<div class="weekpick">'
+    +'<div class="wpg"><b>Show in batch cook and shopping list:</b>'
     +Array.from({length:WEEKS},(_,w)=>
       `<label><input type="radio" name="viewweek" data-viewweek="${w}"${w===state.viewWeek?' checked':''}> Week ${w+1}</label>`).join('')
-    +'</div>';
+    +'</div>'
+    +'<div class="wpg"><b>Cook coverage:</b>'
+    +`<label><input type="radio" name="rolling" data-rolling="0"${state.rolling?'':' checked'}> Stay within the week</label>`
+    +`<label><input type="radio" name="rolling" data-rolling="1"${state.rolling?' checked':''}> Roll into the next week</label>`
+    +'</div></div>';
   $('cookwk').textContent=`(Week ${state.viewWeek+1})`;
   $('shopwk').textContent=`(Week ${state.viewWeek+1})`;
 }
 
-function eatenLabel(d,s,cell){
+function eatenLabel(d,s,cell,wk){
   const t=d.slice(0,3)+' '+s.toLowerCase();
   const bits=[];
+  if(wk!==state.viewWeek) bits.push(`Wk ${wk+1}`);
   if(!cell.who.length) bits.push(`${GUEST_COUNT} guests only`);
   else{
     if(cell.who.length!==PEOPLE.length) bits.push(cell.who.join(', ')+' only');
@@ -433,7 +457,6 @@ function eatenLabel(d,s,cell){
 }
 
 function renderCook(){
-  const plan=viewPlan();
   const cur=currentCook();
   const manual=overrideActive();
   const today=todayName();
@@ -447,16 +470,17 @@ function renderCook(){
   $('cook').innerHTML=`<div class="cookinfo">${info}</div><div class="cooks">`+COOKS.map(c=>{
     const dishes=new Map();
     const totals=new Map();
+    const cov=coverage(c,state.viewWeek);
 
-    for(const d of c.days) for(const s of SLOTS){
-      const cell=plan[d+'|'+s]; if(!cell||portionsFor(cell)===0) continue;
+    for(const {day:d,week:wk} of cov) for(const s of SLOTS){
+      const cell=state.weeks[wk][d+'|'+s]; if(!cell||portionsFor(cell)===0) continue;
       const m=getMeal(cell.meal); if(!m) continue;
       const key=m.name.toLowerCase();
       if(!dishes.has(key)) dishes.set(key,{name:m.name,portions:0,guests:false,eat:[],meal:m,amounts:new Map()});
       const dish=dishes.get(key);
       dish.portions+=portionsFor(cell);
       if(cell.guests) dish.guests=true;
-      dish.eat.push(eatenLabel(d,s,cell));
+      dish.eat.push(eatenLabel(d,s,cell,wk));
       m.ingredients.forEach((i,ix)=>{
         const a=amountFor(i,cell); if(!a) return;
         dish.amounts.set(ix,(dish.amounts.get(ix)||0)+a);
@@ -481,13 +505,14 @@ function renderCook(){
         `<tr class="cat"><td colspan="2">${esc(g.label)}</td></tr>`+g.rows.map(r=>
           `<tr><td>${esc(r.name)}</td><td>${fmt(r.qty,r.unit)}</td></tr>`).join('')).join('')}</table>`:'';
 
+    const covers=cov.map(x=>x.day+(x.week!==state.viewWeek?` (Wk ${x.week+1})`:'')).join(', ');
     const active=cur===c.name;
     const faded=!!cur&&!active;
     return `<div class="cook${active?' active':''}${faded?' faded':''}">
       <div class="cookhead">
         <div>
           <h3>${esc(c.name)}</h3>
-          <div class="sub">Covers: ${c.days.join(', ')}</div>
+          <div class="sub">Covers: ${esc(covers)}</div>
         </div>
         <label class="cookpick"><input type="checkbox" data-cook="${esc(c.name)}"${active?' checked':''}> Cooking today${active&&!manual?' <span class="gray">(auto)</span>':''}</label>
       </div>
@@ -607,6 +632,10 @@ document.addEventListener('change',e=>{
   }
   if(d.viewweek!==undefined){
     state.viewWeek=+d.viewweek;
+    save(); return;
+  }
+  if(d.rolling!==undefined){
+    state.rolling=d.rolling==='1';
     save(); return;
   }
   if(!d.day) return;
