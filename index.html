@@ -57,8 +57,12 @@
   #shop table{width:auto;min-width:420px}
   #shop th:nth-child(2),#shop td:nth-child(2){min-width:240px}
   #shop th:nth-child(3),#shop td:nth-child(3){min-width:90px}
-  .staplelist{display:flex;flex-wrap:wrap;gap:6px 20px;font-size:14px;margin:6px 0 16px}
-  .gray{color:#888;font-size:12px}
+  .staplelist{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:2px 24px;font-size:14px;margin:8px 0 16px}
+  .staplelist label{display:grid;grid-template-columns:20px 1fr auto;align-items:center;gap:6px;padding:3px 6px;border-bottom:1px solid #eee}
+  .staplelist label:hover{background:#f7f7f7}
+  .staplelist label.off{color:#aaa}
+  .staplelist input{padding:0;margin:0}
+  .staplelist .sq{color:#888;font-size:12px;white-space:nowrap}  .gray{color:#888;font-size:12px}
 </style>
 </head>
 <body>
@@ -505,7 +509,8 @@ function renderStaples(){
   el.innerHTML='<div class="row"><button data-staplesall="on">Tick all</button><button data-staplesall="off">Untick all</button></div>'
     +'<div class="staplelist">'+staples.map(s=>{
       const k=skey(s.name,s.unit);
-      return `<label><input type="checkbox" data-staple="${esc(k)}"${skips[k]?'':' checked'}> ${esc(s.name)} (${fmt(s.qty,s.unit)})</label>`;
+      const off=!!skips[k];
+      return `<label class="${off?'off':''}"><input type="checkbox" data-staple="${esc(k)}"${off?'':' checked'}><span>${esc(s.name)}</span><span class="sq">${fmt(s.qty,s.unit)}</span></label>`;
     }).join('')+'</div>';
 }
 
