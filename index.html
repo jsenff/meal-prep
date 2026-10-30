@@ -22,6 +22,14 @@
   .guestrow{margin-top:2px;font-size:12px;color:#555}
   .guestrow label{display:flex;align-items:center;gap:3px}
   .guestrow input{padding:0}
+  .weekhead{display:flex;align-items:center;gap:12px;margin:16px 0 6px}
+  .weekhead h3{margin:0}
+  .badge{font-size:12px;font-weight:normal;color:#4a7a3a;background:#e2eddb;border-radius:10px;padding:1px 8px}
+  .weekpick{display:flex;align-items:center;gap:16px;flex-wrap:wrap;padding:8px 12px;border:1px solid #9bc58a;
+            background:#f3f8ef;border-radius:6px;font-size:14px}
+  .weekpick label{display:flex;align-items:center;gap:4px}
+  .weekpick input{padding:0}
+  .wk{font-size:16px;font-weight:normal;color:#4a7a3a}
   .status{font-size:13px;color:#555}
   .status.err{color:#b00}
   .note{font-size:13px;color:#666}
@@ -67,10 +75,15 @@
   <div class="note" id="plannote"></div>
   <div id="plan"></div>
 </section>
-<section><h2>Batch cook</h2><div id="cook"></div></section>
 
 <section>
-  <h2>Shopping list</h2>
+  <div id="weekpick"></div>
+</section>
+
+<section><h2>Batch cook <span id="cookwk" class="wk"></span></h2><div id="cook"></div></section>
+
+<section>
+  <h2>Shopping list <span id="shopwk" class="wk"></span></h2>
   <h3>Staples</h3>
   <div class="note">Untick anything you already have this week.</div>
   <div id="staples"></div>
@@ -101,6 +114,9 @@ const PEOPLE=['John','Clare'];
 const GUEST_COUNT=2;
 const GUEST_VERSION='John';
 
+// How many weeks you can plan at once.
+const WEEKS=2;
+
 const DAYS=['Monday','Tuesday','Wednesday','Thursday','Friday','Saturday','Sunday'];
 const SLOTS=['Lunch','Dinner'];
 
@@ -114,16 +130,12 @@ const COOKS=[
 // Order categories appear on the shopping list and cook cards (roughly your walk round the shop).
 // Names are matched ignoring case. Categories not listed come next in alphabetical order, then Other.
 const CATEGORY_ORDER=['Meat','Veg','Fruit','Dairy/Eggs','Dry Goods','Frozen','Other'];
-  
-// Accepts current and older saved formats.
-// Plan cells become {meal: name, who: [names eating], guests: true/false}.
+
+// Cleans one week's plan. Cells become {meal: name, who: [names eating], guests: true/false}.
 // Older cells (with a multiplier) default to everyone eating and no guests.
-function migrate(s){
-  s=s||{};
-  const oldNames={};
-  for(const m of (s.meals||[])) if(m.id) oldNames[m.id]=m.name;
+function cleanPlan(raw,oldNames){
   const plan={};
-  for(const [k,v] of Object.entries(s.plan||{})){
+  for(const [k,v] of Object.entries(raw||{})){
     const slot=k.split('|')[1];
     if(!SLOTS.includes(slot)) continue;
     let name=null, who=PEOPLE.slice(), guests=false;
@@ -135,19 +147,43 @@ function migrate(s){
     }
     if(name) plan[k]={meal:name,who,guests};
   }
+  return plan;
+}
+
+// Accepts current and older saved formats. An older single-week plan becomes Week 1.
+function migrate(s){
+  s=s||{};
+  const oldNames={};
+  for(const m of (s.meals||[])) if(m.id) oldNames[m.id]=m.name;
+  const rawWeeks=Array.isArray(s.weeks)?s.weeks:[s.plan||{}];
+  const weeks=[];
+  for(let w=0;w<WEEKS;w++) weeks.push(cleanPlan(rawWeeks[w]||{},oldNames));
+  // Per-week objects. An older single (non-weekly) object is kept as Week 1.
+  const perWeek=(arr,old)=>{
+    const out=[];
+    for(let w=0;w<WEEKS;w++) out.push((Array.isArray(arr)&&arr[w])||(w===0&&old)||{});
+    return out;
+  };
+  const tickedW=perWeek(s.tickedW,s.ticked);
+  const skipW=perWeek(s.skipW,s.skipStaples);
+  const viewWeek=(Number.isInteger(s.viewWeek)&&s.viewWeek>=0&&s.viewWeek<WEEKS)?s.viewWeek:0;
   const meals=(s.meals||[]).map(m=>({name:m.name,
     ingredients:(m.ingredients||[]).map(i=>({...i,person:i.person||''}))}));
   const o=s.cookOverride;
   const cookOverride=(o&&typeof o.date==='string'&&typeof o.name==='string')?{date:o.date,name:o.name}:null;
-  return {plan,meals,staples:s.staples||[],ticked:s.ticked||{},skipStaples:s.skipStaples||{},cookOverride};
+  return {weeks,meals,staples:s.staples||[],tickedW,skipW,viewWeek,cookOverride};
 }
 
-let state={plan:{},ticked:{},skipStaples:{},cookOverride:null}, meals=[], staples=[], catMap=new Map();
+let state={weeks:Array.from({length:WEEKS},()=>({})),
+           tickedW:Array.from({length:WEEKS},()=>({})),
+           skipW:Array.from({length:WEEKS},()=>({})),
+           viewWeek:0, cookOverride:null};
+let meals=[], staples=[], catMap=new Map();
 let statusMsg='', statusErr=false;
 try{
   const saved=migrate(JSON.parse(localStorage.getItem('mealprep')||'null'));
-  state.plan=saved.plan; state.ticked=saved.ticked; state.skipStaples=saved.skipStaples;
-  state.cookOverride=saved.cookOverride;
+  state.weeks=saved.weeks; state.tickedW=saved.tickedW; state.skipW=saved.skipW;
+  state.viewWeek=saved.viewWeek; state.cookOverride=saved.cookOverride;
   meals=saved.meals; staples=saved.staples;
 }catch(err){}
 
@@ -157,8 +193,14 @@ const fmt=(q,u)=>`${+q.toFixed(2)} ${esc(u)}`;
 const skey=(n,u)=>String(n).trim().toLowerCase()+'|'+u;
 const getMeal=name=>meals.find(m=>m.name.toLowerCase()===String(name).toLowerCase());
 const persist=()=>localStorage.setItem('mealprep',JSON.stringify(
-  {plan:state.plan,ticked:state.ticked,skipStaples:state.skipStaples,cookOverride:state.cookOverride,meals,staples}));
+  {weeks:state.weeks,tickedW:state.tickedW,skipW:state.skipW,viewWeek:state.viewWeek,
+   cookOverride:state.cookOverride,meals,staples}));
 const save=()=>{persist();render();};
+
+// The plan, ticks and staple choices for the week currently shown in the cards and shopping list.
+const viewPlan=()=>state.weeks[state.viewWeek];
+const viewTicks=()=>state.tickedW[state.viewWeek];
+const viewSkips=()=>state.skipW[state.viewWeek];
 
 // Today's date (local time) and weekday name, used for the automatic cook selection.
 const todayStr=()=>{
@@ -331,29 +373,48 @@ function renderPlan(){
     +`Guests adds ${GUEST_COUNT} extra portions, made the ${GUEST_VERSION} way. `
     +'For extra lunches, plan them as their own Lunch or Dinner cell.';
 
-  // Days covered by the selected cook are tinted, the rest fade. With no cook selected, nothing changes.
+  // In the week shown below, days covered by the selected cook are tinted and the rest fade.
   const cc=COOKS.find(c=>c.name===currentCook());
-  const dayCls=d=>cc?(cc.days.includes(d)?'dayon':'dayoff'):'';
   const opts=sel=>{
     const known=sel&&getMeal(sel);
     return '<option value="">-</option>'
       +(sel&&!known?`<option value="${esc(sel)}" selected>${esc(sel)} (not in sheet)</option>`:'')
       +meals.map(m=>`<option value="${esc(m.name)}"${known&&m.name.toLowerCase()===sel.toLowerCase()?' selected':''}>${esc(m.name)}</option>`).join('');
   };
-  $('plan').innerHTML='<table><tr><th></th>'+DAYS.map(d=>`<th class="${dayCls(d)}">${d}</th>`).join('')+'</tr>'+
-    SLOTS.map(s=>`<tr><th>${s}</th>`+DAYS.map(d=>{
-      const cell=state.plan[d+'|'+s];
-      const missing=cell&&!getMeal(cell.meal);
-      return `<td class="${dayCls(d)}">
-        <select data-day="${d}" data-slot="${s}">${opts(cell&&cell.meal)}</select>
-        ${cell?`<div class="who">${PEOPLE.map(p=>
-          `<label><input type="checkbox" data-day="${d}" data-slot="${s}" data-who="${esc(p)}"${cell.who.includes(p)?' checked':''}> ${esc(p)}</label>`).join('')}</div>
-        <div class="guestrow"><label><input type="checkbox" data-day="${d}" data-slot="${s}" data-guests="1"${cell.guests?' checked':''}> Guests (+${GUEST_COUNT})</label></div>`:''}
-        ${missing?'<div class="warn">Not in sheet, ignored in totals</div>':''}
-        ${cell&&portionsFor(cell)===0?'<div class="warn">Nobody ticked, ignored in totals</div>':''}
-      </td>`;
-    }).join('')+'</tr>').join('')+
-    '</table>';
+
+  const weekHtml=w=>{
+    const plan=state.weeks[w];
+    const shown=w===state.viewWeek;
+    const dayCls=d=>(cc&&shown)?(cc.days.includes(d)?'dayon':'dayoff'):'';
+    return `<div class="weekhead">
+        <h3>Week ${w+1}${shown?' <span class="badge">shown in batch cook and shopping list</span>':''}</h3>
+        <button data-clearweek="${w}">Clear all</button>
+      </div>`
+      +'<table><tr><th></th>'+DAYS.map(d=>`<th class="${dayCls(d)}">${d}</th>`).join('')+'</tr>'
+      +SLOTS.map(s=>`<tr><th>${s}</th>`+DAYS.map(d=>{
+        const cell=plan[d+'|'+s];
+        const missing=cell&&!getMeal(cell.meal);
+        return `<td class="${dayCls(d)}">
+          <select data-week="${w}" data-day="${d}" data-slot="${s}">${opts(cell&&cell.meal)}</select>
+          ${cell?`<div class="who">${PEOPLE.map(p=>
+            `<label><input type="checkbox" data-week="${w}" data-day="${d}" data-slot="${s}" data-who="${esc(p)}"${cell.who.includes(p)?' checked':''}> ${esc(p)}</label>`).join('')}</div>
+          <div class="guestrow"><label><input type="checkbox" data-week="${w}" data-day="${d}" data-slot="${s}" data-guests="1"${cell.guests?' checked':''}> Guests (+${GUEST_COUNT})</label></div>`:''}
+          ${missing?'<div class="warn">Not in sheet, ignored in totals</div>':''}
+          ${cell&&portionsFor(cell)===0?'<div class="warn">Nobody ticked, ignored in totals</div>':''}
+        </td>`;
+      }).join('')+'</tr>').join('')
+      +'</table>';
+  };
+  $('plan').innerHTML=Array.from({length:WEEKS},(_,w)=>weekHtml(w)).join('');
+}
+
+function renderWeekPick(){
+  $('weekpick').innerHTML='<div class="weekpick"><b>Show in batch cook and shopping list:</b>'
+    +Array.from({length:WEEKS},(_,w)=>
+      `<label><input type="radio" name="viewweek" data-viewweek="${w}"${w===state.viewWeek?' checked':''}> Week ${w+1}</label>`).join('')
+    +'</div>';
+  $('cookwk').textContent=`(Week ${state.viewWeek+1})`;
+  $('shopwk').textContent=`(Week ${state.viewWeek+1})`;
 }
 
 function eatenLabel(d,s,cell){
@@ -368,6 +429,7 @@ function eatenLabel(d,s,cell){
 }
 
 function renderCook(){
+  const plan=viewPlan();
   const cur=currentCook();
   const manual=overrideActive();
   const today=todayName();
@@ -383,7 +445,7 @@ function renderCook(){
     const totals=new Map();
 
     for(const d of c.days) for(const s of SLOTS){
-      const cell=state.plan[d+'|'+s]; if(!cell||portionsFor(cell)===0) continue;
+      const cell=plan[d+'|'+s]; if(!cell||portionsFor(cell)===0) continue;
       const m=getMeal(cell.meal); if(!m) continue;
       const key=m.name.toLowerCase();
       if(!dishes.has(key)) dishes.set(key,{name:m.name,portions:0,guests:false,eat:[],meal:m,amounts:new Map()});
@@ -439,21 +501,23 @@ function renderStaples(){
       :'<p class="note">Staples are not connected yet. Paste the published Staples CSV link into STAPLES_URL near the top of the file.</p>';
     return;
   }
+  const skips=viewSkips();
   el.innerHTML='<div class="row"><button data-staplesall="on">Tick all</button><button data-staplesall="off">Untick all</button></div>'
     +'<div class="staplelist">'+staples.map(s=>{
       const k=skey(s.name,s.unit);
-      return `<label><input type="checkbox" data-staple="${esc(k)}"${state.skipStaples[k]?'':' checked'}> ${esc(s.name)} (${fmt(s.qty,s.unit)})</label>`;
+      return `<label><input type="checkbox" data-staple="${esc(k)}"${skips[k]?'':' checked'}> ${esc(s.name)} (${fmt(s.qty,s.unit)})</label>`;
     }).join('')+'</div>';
 }
 
 function shopTotals(){
   const totals=new Map();
+  const skips=viewSkips();
   const add=(name,unit,qty)=>{
     const k=skey(name,unit);
     if(!totals.has(k)) totals.set(k,{key:k,name:name.trim(),unit,qty:0});
     totals.get(k).qty+=qty;
   };
-  for(const cell of Object.values(state.plan)){
+  for(const cell of Object.values(viewPlan())){
     const m=getMeal(cell.meal); if(!m) continue;
     for(const i of m.ingredients){
       const a=amountFor(i,cell);
@@ -461,7 +525,7 @@ function shopTotals(){
     }
   }
   for(const s of staples){
-    if(state.skipStaples[skey(s.name,s.unit)]) continue;
+    if(skips[skey(s.name,s.unit)]) continue;
     add(s.name,s.unit,s.qty);
   }
   return [...totals.values()];
@@ -469,6 +533,7 @@ function shopTotals(){
 
 function renderShop(){
   const rows=shopTotals();
+  const ticks=viewTicks();
   if(!rows.length){
     $('shop').innerHTML='<p>Plan some meals to build the list.</p>';
     $('tickinfo').textContent='';
@@ -479,7 +544,7 @@ function renderShop(){
   for(const g of groupByCategory(rows)){
     html+=`<tr class="cat"><td colspan="3">${esc(g.label)}</td></tr>`;
     for(const r of g.rows){
-      const done=!!state.ticked[r.key];
+      const done=!!ticks[r.key];
       html+=`<tr class="${done?'done':''}">
         <td class="tickcol"><input type="checkbox" data-tick="${esc(r.key)}"${done?' checked':''}></td>
         <td>${esc(r.name)}</td><td>${fmt(r.qty,r.unit)}</td></tr>`;
@@ -488,14 +553,17 @@ function renderShop(){
   html+='</table>';
   if(uncat) html+=`<p class="note">${uncat} item(s) have no category and are listed under Other. Add a category in the sheet to move them.</p>`;
   $('shop').innerHTML=html;
-  const n=rows.filter(r=>state.ticked[r.key]).length;
+  const n=rows.filter(r=>ticks[r.key]).length;
   $('tickinfo').textContent=`${n} of ${rows.length} ticked`;
 }
 
-function render(){renderStatus();renderMeals();renderPlan();renderCook();renderStaples();renderShop();}
+function render(){
+  renderStatus();renderMeals();renderPlan();renderWeekPick();
+  renderCook();renderStaples();renderShop();
+}
 
 $('reload').onclick=loadSheet;
-$('clearTicks').onclick=()=>{state.ticked={};save();};
+$('clearTicks').onclick=()=>{state.tickedW[state.viewWeek]={};save();};
 
 document.addEventListener('click',e=>{
   const d=e.target.dataset||{};
@@ -503,46 +571,61 @@ document.addEventListener('click',e=>{
     state.cookOverride=null; save();
   }
   if(d.staplesall){
-    state.skipStaples={};
-    if(d.staplesall==='off') for(const s of staples) state.skipStaples[skey(s.name,s.unit)]=true;
+    const skips={};
+    if(d.staplesall==='off') for(const s of staples) skips[skey(s.name,s.unit)]=true;
+    state.skipW[state.viewWeek]=skips;
     save();
+  }
+  if(d.clearweek!==undefined){
+    const w=+d.clearweek;
+    if(!Object.keys(state.weeks[w]).length) return;
+    if(!confirm(`Clear all meals from Week ${w+1}?`)) return;
+    state.weeks[w]={}; save();
   }
 });
 
 document.addEventListener('change',e=>{
   const t=e.target, d=t.dataset;
   if(d.tick!==undefined){
-    if(t.checked) state.ticked[d.tick]=true; else delete state.ticked[d.tick];
+    const ticks=viewTicks();
+    if(t.checked) ticks[d.tick]=true; else delete ticks[d.tick];
     persist(); renderShop(); return;
   }
   if(d.staple!==undefined){
-    if(t.checked) delete state.skipStaples[d.staple]; else state.skipStaples[d.staple]=true;
+    const skips=viewSkips();
+    if(t.checked) delete skips[d.staple]; else skips[d.staple]=true;
     save(); return;
   }
   if(d.cook!==undefined){
     state.cookOverride={date:todayStr(),name:t.checked?d.cook:''};
     save(); return;
   }
+  if(d.viewweek!==undefined){
+    state.viewWeek=+d.viewweek;
+    save(); return;
+  }
   if(!d.day) return;
+  const plan=state.weeks[+d.week];
+  if(!plan) return;
   const k=d.day+'|'+d.slot;
   if(d.who!==undefined){
-    const cell=state.plan[k]; if(!cell) return;
+    const cell=plan[k]; if(!cell) return;
     cell.who=PEOPLE.filter(p=>p===d.who?t.checked:cell.who.includes(p));
   } else if(d.guests!==undefined){
-    const cell=state.plan[k]; if(!cell) return;
+    const cell=plan[k]; if(!cell) return;
     cell.guests=t.checked;
   } else if(t.value){
-    const prev=state.plan[k];
-    state.plan[k]={meal:t.value,who:prev?prev.who:PEOPLE.slice(),guests:prev?!!prev.guests:false};
+    const prev=plan[k];
+    plan[k]={meal:t.value,who:prev?prev.who:PEOPLE.slice(),guests:prev?!!prev.guests:false};
   } else {
-    delete state.plan[k];
+    delete plan[k];
   }
   save();
 });
 
 $('exp').onclick=()=>{
   const a=document.createElement('a');
-  a.href=URL.createObjectURL(new Blob([JSON.stringify({plan:state.plan,skipStaples:state.skipStaples},null,2)],{type:'application/json'}));
+  a.href=URL.createObjectURL(new Blob([JSON.stringify({weeks:state.weeks,skipW:state.skipW},null,2)],{type:'application/json'}));
   a.download='meal-plan.json'; a.click();
 };
 $('imp').onchange=e=>{
@@ -551,7 +634,7 @@ $('imp').onchange=e=>{
   r.onload=()=>{
     try{
       const imp=migrate(JSON.parse(r.result));
-      state.plan=imp.plan; state.skipStaples=imp.skipStaples; save();
+      state.weeks=imp.weeks; state.skipW=imp.skipW; save();
     }catch{alert('Invalid file');}
   };
   r.readAsText(f);
