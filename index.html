@@ -35,18 +35,19 @@
   .status.err{color:#b00}
   .note{font-size:13px;color:#666}
   .warn{color:#b60;font-size:12px;margin-top:4px}
+  .cook{max-width:760px;border:1px solid #9bc58a;background:#f9fcf7;border-radius:6px;padding:12px 16px}
   .cookinfo{font-size:13px;color:#666;margin-bottom:10px}
   .cookinfo button{padding:1px 6px;font-size:12px;margin-left:6px}
-  .cooks{display:flex;gap:24px;flex-wrap:wrap}
-  .cook{flex:1;min-width:380px;border:1px solid #ccc;border-radius:6px;padding:12px 16px;
-        transition:opacity .2s,filter .2s,background .2s}
-  .cook.active{background:#f3f8ef;border-color:#9bc58a;box-shadow:0 0 0 2px #e2eddb}
-  .cook.faded{opacity:.5;filter:grayscale(1)}
-  .cookhead{display:flex;justify-content:space-between;align-items:flex-start;gap:12px}
-  .cookpick{display:flex;align-items:center;gap:5px;font-size:13px;color:#444;white-space:nowrap}
-  .cookpick input{padding:0}
-  .cook h3{margin:0 0 2px}
-  .cook .sub{color:#666;font-size:13px;margin-bottom:10px}
+  .cook .sub{color:#666;font-size:13px;margin:8px 0 6px}
+  .presets{display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin-bottom:8px;font-size:12px;color:#555}
+  .presets button{padding:1px 8px;font-size:12px}
+  .cdays{margin:0 0 6px;font-size:12px;color:#555}
+  .cdrow{display:flex;align-items:center;gap:4px;margin:3px 0;flex-wrap:wrap}
+  .cdrow .lab{width:96px;color:#777}
+  .chip{position:relative}
+  .chip input{position:absolute;opacity:0;width:0;height:0;pointer-events:none}
+  .chip span{display:inline-block;padding:1px 7px;border:1px solid #ccc;border-radius:10px;cursor:pointer;background:#fff;color:#888}
+  .chip input:checked + span{background:#e2eddb;border-color:#9bc58a;color:#2f5a22}
   .dish{margin:10px 0;padding-bottom:8px;border-bottom:1px dashed #ddd}
   .dish .title{font-weight:600}
   .dish .eat{color:#666;font-size:13px}
@@ -90,6 +91,7 @@
 
 <section>
   <h2>Shopping list <span id="shopwk" class="wk"></span></h2>
+  <div class="note" id="shopcover"></div>
   <h3>Staples</h3>
   <div class="note">Untick anything you already have this week.</div>
   <div id="staples"></div>
@@ -126,17 +128,17 @@ const WEEKS=2;
 const DAYS=['Monday','Tuesday','Wednesday','Thursday','Friday','Saturday','Sunday'];
 const SLOTS=['Lunch','Dinner'];
 
-// Each cooking session:
-//   on:   the weekday you normally cook (selected automatically that day)
-//   days: the plan days it covers
-//   next: the days from "days" that belong to the FOLLOWING week when "Roll into the next week" is chosen
+// Preset sets of cook days, offered as buttons on the cook card.
+//   on:   the weekday this preset is selected automatically
+//   days: the days it covers
+//   next: the days from "days" that go in the FOLLOWING week when "Roll into the next week" is chosen
 // Day names must match DAYS exactly.
-const COOKS=[
+const PRESETS=[
   {name:'Tuesday cook',  on:'Tuesday',  days:['Thursday','Friday','Saturday'], next:[]},
   {name:'Saturday cook', on:'Saturday', days:['Sunday','Monday','Tuesday','Wednesday'], next:['Monday','Tuesday','Wednesday']}
 ];
 
-// Order categories appear on the shopping list and cook cards (roughly your walk round the shop).
+// Order categories appear on the shopping list and cook card (roughly your walk round the shop).
 // Names are matched ignoring case. Categories not listed come next in alphabetical order, then Other.
 const CATEGORY_ORDER=['Meat','Veg','Fruit','Dairy/Eggs','Dry Goods','Frozen','Other'];
 
@@ -179,8 +181,12 @@ function migrate(s){
   const rolling=!!s.rolling;
   const meals=(s.meals||[]).map(m=>({name:m.name,
     ingredients:(m.ingredients||[]).map(i=>({...i,person:i.person||''}))}));
+  // Days chosen by hand on the cook card, as [{day, off}] (off 0 = shown week, 1 = following week).
+  // Only valid for the day they were chosen. Older saved formats are ignored.
   const o=s.cookOverride;
-  const cookOverride=(o&&typeof o.date==='string'&&typeof o.name==='string')?{date:o.date,name:o.name}:null;
+  const cookOverride=(o&&typeof o.date==='string'&&Array.isArray(o.days))
+    ?{date:o.date,days:o.days.filter(x=>x&&DAYS.includes(x.day)&&(x.off===0||x.off===1)).map(x=>({day:x.day,off:x.off}))}
+    :null;
   return {weeks,meals,staples:s.staples||[],tickedW,skipW,viewWeek,rolling,cookOverride};
 }
 
@@ -207,34 +213,41 @@ const persist=()=>localStorage.setItem('mealprep',JSON.stringify(
    cookOverride:state.cookOverride,meals,staples}));
 const save=()=>{persist();render();};
 
-// The plan, ticks and staple choices for the week currently shown in the cards and shopping list.
+// The plan, ticks and staple choices for the week currently shown in the cook card and shopping list.
 const viewPlan=()=>state.weeks[state.viewWeek];
 const viewTicks=()=>state.tickedW[state.viewWeek];
 const viewSkips=()=>state.skipW[state.viewWeek];
 
-// Which plan days a cook covers, as [{day, week}], when week v is the one being shown.
-// In rolling mode, the days listed in the cook's "next" belong to the following week.
-// With two weeks that wraps round, so Week 2 rolls into Week 1 (a repeating fortnight).
-function coverage(c,v){
-  return c.days.map(d=>({day:d,week:(state.rolling&&(c.next||[]).includes(d))?(v+1)%WEEKS:v}));
-}
-
-// Today's date (local time) and weekday name, used for the automatic cook selection.
+// Today's date (local time) and weekday name, used for the automatic selection.
 const todayStr=()=>{
   const d=new Date();
   return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');
 };
 const todayName=()=>DAYS[(new Date().getDay()+6)%7];
 
+// Chronological order for a list of {day, off}.
+const sortDays=list=>list.sort((a,b)=>(a.off*7+DAYS.indexOf(a.day))-(b.off*7+DAYS.indexOf(b.day)));
+
+// The days a preset covers as [{day, off}]. In rolling mode the days in "next" go in the following week.
+function presetDays(p){
+  return sortDays(p.days.map(d=>({day:d,off:(state.rolling&&(p.next||[]).includes(d))?1:0})));
+}
+
 // A manual choice only lasts for the day it was made, then it reverts to automatic.
 const overrideActive=()=>!!(state.cookOverride&&state.cookOverride.date===todayStr());
 
-// Name of the cook currently selected, or '' for none.
-function currentCook(){
-  const name=overrideActive()
-    ?state.cookOverride.name
-    :((COOKS.find(c=>c.on===todayName())||{}).name||'');
-  return COOKS.some(c=>c.name===name)?name:'';
+// The days currently selected on the cook card, as [{day, off}].
+// Manual choice for today if there is one, otherwise the preset for today's weekday, otherwise none.
+function currentDays(){
+  if(overrideActive()) return state.cookOverride.days;
+  const p=PRESETS.find(x=>x.on===todayName());
+  return p?presetDays(p):[];
+}
+
+// The selected days as [{day, week}], when week v is the one being shown.
+// With two weeks the following week wraps round, so Week 2 rolls into Week 1 (a repeating fortnight).
+function coverage(v){
+  return currentDays().map(x=>({day:x.day,week:(v+x.off)%WEEKS}));
 }
 
 // Total portions for one planner cell: people ticked, plus guests if ticked.
@@ -390,10 +403,9 @@ function renderPlan(){
     +`Guests adds ${GUEST_COUNT} extra portions, made the ${GUEST_VERSION} way. `
     +'For extra lunches, plan them as their own Lunch or Dinner cell.';
 
-  // Days covered by the selected cook are tinted and the other days in that week fade.
-  // A week the cook doesn't reach is left plain.
-  const cc=COOKS.find(c=>c.name===currentCook());
-  const cov=cc?coverage(cc,state.viewWeek):[];
+  // Days selected on the cook card are tinted and the other days in that week fade.
+  // A week the cook days don't reach is left plain.
+  const cov=coverage(state.viewWeek);
   const covered=new Set(cov.map(x=>x.week+'|'+x.day));
   const touched=new Set(cov.map(x=>x.week));
 
@@ -407,9 +419,9 @@ function renderPlan(){
   const weekHtml=w=>{
     const plan=state.weeks[w];
     const shown=w===state.viewWeek;
-    const dayCls=d=>(cc&&touched.has(w))?(covered.has(w+'|'+d)?'dayon':'dayoff'):'';
+    const dayCls=d=>touched.has(w)?(covered.has(w+'|'+d)?'dayon':'dayoff'):'';
     return `<div class="weekhead">
-        <h3>Week ${w+1}${shown?' <span class="badge">shown in batch cook and shopping list</span>':''}${(!shown&&cc&&touched.has(w))?` <span class="badge">${esc(cc.name)} also covers days here</span>`:''}</h3>
+        <h3>Week ${w+1}${shown?' <span class="badge">shown in batch cook and shopping list</span>':''}${(!shown&&touched.has(w))?' <span class="badge">cook days also fall here</span>':''}</h3>
         <button data-clearweek="${w}">Clear all</button>
       </div>`
       +'<table><tr><th></th>'+DAYS.map(d=>`<th class="${dayCls(d)}">${d}</th>`).join('')+'</tr>'
@@ -436,9 +448,10 @@ function renderWeekPick(){
     +Array.from({length:WEEKS},(_,w)=>
       `<label><input type="radio" name="viewweek" data-viewweek="${w}"${w===state.viewWeek?' checked':''}> Week ${w+1}</label>`).join('')
     +'</div>'
-    +'<div class="wpg"><b>Cook coverage:</b>'
+    +'<div class="wpg"><b>Cook and shop coverage:</b>'
     +`<label><input type="radio" name="rolling" data-rolling="0"${state.rolling?'':' checked'}> Stay within the week</label>`
     +`<label><input type="radio" name="rolling" data-rolling="1"${state.rolling?' checked':''}> Roll into the next week</label>`
+    +'<span class="gray">Roll: the Saturday preset reaches into the next week, and the shopping list follows the cook days.</span>'
     +'</div></div>';
   $('cookwk').textContent=`(Week ${state.viewWeek+1})`;
   $('shopwk').textContent=`(Week ${state.viewWeek+1})`;
@@ -457,69 +470,70 @@ function eatenLabel(d,s,cell,wk){
 }
 
 function renderCook(){
-  const cur=currentCook();
+  const days=currentDays();
+  const cov=coverage(state.viewWeek);
   const manual=overrideActive();
   const today=todayName();
-  const autoCook=COOKS.find(c=>c.on===today);
+  const autoPreset=PRESETS.find(p=>p.on===today);
 
   let info;
-  if(manual) info=`Selection set manually for today. <button data-cookauto="1">Back to automatic</button>`;
-  else if(autoCook) info=`Today is ${today}, so the ${esc(autoCook.name)} is selected automatically. Untick it, or tick the other card, to override.`;
-  else info=`Today is ${today}, which is not a cook day. Tick a card if you are cooking off schedule.`;
+  if(manual) info=`Days set manually for today. <button data-cookauto="1">Back to automatic</button>`;
+  else if(autoPreset) info=`Today is ${today}, so the ${esc(autoPreset.name)} days are selected automatically. Change them below if you are cooking differently.`;
+  else info=`Today is ${today}, which is not a regular cook day. Pick the days to cook for below, or use a preset.`;
 
-  $('cook').innerHTML=`<div class="cookinfo">${info}</div><div class="cooks">`+COOKS.map(c=>{
-    const dishes=new Map();
-    const totals=new Map();
-    const cov=coverage(c,state.viewWeek);
+  const dishes=new Map();
+  const totals=new Map();
+  for(const {day:d,week:wk} of cov) for(const s of SLOTS){
+    const cell=state.weeks[wk][d+'|'+s]; if(!cell||portionsFor(cell)===0) continue;
+    const m=getMeal(cell.meal); if(!m) continue;
+    const key=m.name.toLowerCase();
+    if(!dishes.has(key)) dishes.set(key,{name:m.name,portions:0,guests:false,eat:[],meal:m,amounts:new Map()});
+    const dish=dishes.get(key);
+    dish.portions+=portionsFor(cell);
+    if(cell.guests) dish.guests=true;
+    dish.eat.push(eatenLabel(d,s,cell,wk));
+    m.ingredients.forEach((i,ix)=>{
+      const a=amountFor(i,cell); if(!a) return;
+      dish.amounts.set(ix,(dish.amounts.get(ix)||0)+a);
+      const k=skey(i.name,i.unit);
+      if(!totals.has(k)) totals.set(k,{name:i.name.trim(),unit:i.unit,qty:0});
+      totals.get(k).qty+=a;
+    });
+  }
 
-    for(const {day:d,week:wk} of cov) for(const s of SLOTS){
-      const cell=state.weeks[wk][d+'|'+s]; if(!cell||portionsFor(cell)===0) continue;
-      const m=getMeal(cell.meal); if(!m) continue;
-      const key=m.name.toLowerCase();
-      if(!dishes.has(key)) dishes.set(key,{name:m.name,portions:0,guests:false,eat:[],meal:m,amounts:new Map()});
-      const dish=dishes.get(key);
-      dish.portions+=portionsFor(cell);
-      if(cell.guests) dish.guests=true;
-      dish.eat.push(eatenLabel(d,s,cell,wk));
-      m.ingredients.forEach((i,ix)=>{
-        const a=amountFor(i,cell); if(!a) return;
-        dish.amounts.set(ix,(dish.amounts.get(ix)||0)+a);
-        const k=skey(i.name,i.unit);
-        if(!totals.has(k)) totals.set(k,{name:i.name.trim(),unit:i.unit,qty:0});
-        totals.get(k).qty+=a;
-      });
-    }
+  const dishHtml=[...dishes.values()].map(dish=>`
+    <div class="dish">
+      <div class="title">Cook ${esc(dish.name)} (${dish.portions} portion${dish.portions===1?'':'s'})</div>
+      <div class="eat">Eaten: ${dish.eat.map(esc).join(', ')}</div>
+      <ul>${dish.meal.ingredients.map((i,ix)=>dish.amounts.has(ix)
+        ?`<li>${esc(i.name)}${i.person?` (${esc(i.person)}${dish.guests&&i.person===GUEST_VERSION?', incl. guests':''})`:''}: ${fmt(dish.amounts.get(ix),i.unit)}</li>`:'').join('')}</ul>
+    </div>`).join('');
 
-    const dishHtml=[...dishes.values()].map(dish=>`
-      <div class="dish">
-        <div class="title">Cook ${esc(dish.name)} (${dish.portions} portion${dish.portions===1?'':'s'})</div>
-        <div class="eat">Eaten: ${dish.eat.map(esc).join(', ')}</div>
-        <ul>${dish.meal.ingredients.map((i,ix)=>dish.amounts.has(ix)
-          ?`<li>${esc(i.name)}${i.person?` (${esc(i.person)}${dish.guests&&i.person===GUEST_VERSION?', incl. guests':''})`:''}: ${fmt(dish.amounts.get(ix),i.unit)}</li>`:'').join('')}</ul>
-      </div>`).join('');
+  const rows=[...totals.values()];
+  const totalHtml=rows.length?`
+    <b>Combined ingredients</b>
+    <table><tr><th>Item</th><th>Total</th></tr>${groupByCategory(rows).map(g=>
+      `<tr class="cat"><td colspan="2">${esc(g.label)}</td></tr>`+g.rows.map(r=>
+        `<tr><td>${esc(r.name)}</td><td>${fmt(r.qty,r.unit)}</td></tr>`).join('')).join('')}</table>`:'';
 
-    const rows=[...totals.values()];
-    const totalHtml=rows.length?`
-      <b>Combined ingredients</b>
-      <table><tr><th>Item</th><th>Total</th></tr>${groupByCategory(rows).map(g=>
-        `<tr class="cat"><td colspan="2">${esc(g.label)}</td></tr>`+g.rows.map(r=>
-          `<tr><td>${esc(r.name)}</td><td>${fmt(r.qty,r.unit)}</td></tr>`).join('')).join('')}</table>`:'';
+  // Day pills: one row for the shown week, one for the following week.
+  const have=new Set(days.map(x=>x.off+'|'+x.day));
+  const chipRows=[0,1].filter(off=>off<WEEKS).map(off=>
+    `<div class="cdrow"><span class="lab">Week ${(state.viewWeek+off)%WEEKS+1}${off?' (next)':''}</span>`
+    +DAYS.map(d=>`<label class="chip"><input type="checkbox" data-cdoff="${off}" data-cdday="${d}"${have.has(off+'|'+d)?' checked':''}><span>${d.slice(0,3)}</span></label>`).join('')
+    +'</div>').join('');
 
-    const covers=cov.map(x=>x.day+(x.week!==state.viewWeek?` (Wk ${x.week+1})`:'')).join(', ');
-    const active=cur===c.name;
-    const faded=!!cur&&!active;
-    return `<div class="cook${active?' active':''}${faded?' faded':''}">
-      <div class="cookhead">
-        <div>
-          <h3>${esc(c.name)}</h3>
-          <div class="sub">Covers: ${esc(covers)}</div>
-        </div>
-        <label class="cookpick"><input type="checkbox" data-cook="${esc(c.name)}"${active?' checked':''}> Cooking today${active&&!manual?' <span class="gray">(auto)</span>':''}</label>
-      </div>
-      ${dishHtml||'<p>Nothing planned for these days.</p>'}
-      ${totalHtml}
-    </div>`;
-  }).join('')+'</div>';
+  const presetBtns=PRESETS.map((p,i)=>`<button data-preset="${i}">${esc(p.name)}</button>`).join('');
+  const covers=cov.map(x=>x.day+(x.week!==state.viewWeek?` (Wk ${x.week+1})`:'')).join(', ');
+
+  $('cook').innerHTML=`<div class="cook">
+    <div class="cookinfo">${info}</div>
+    <div class="presets">Presets: ${presetBtns} <button data-cookclear="1">Clear days</button></div>
+    <div class="cdays">${chipRows}</div>
+    <div class="sub">Cooking for: ${esc(covers)||'no days selected'}</div>
+    ${dishHtml||'<p>Nothing planned for these days.</p>'}
+    ${totalHtml}
+  </div>`;
 }
 
 function renderStaples(){
@@ -539,6 +553,40 @@ function renderStaples(){
     }).join('')+'</div>';
 }
 
+// The planner cells that feed the shopping list for the week shown.
+// Stay within the week: every meal in that week.
+// Roll into the next week: only the days selected on the cook card (which can reach into the other week).
+// If no cook days are selected, it falls back to the whole week.
+function shopCells(){
+  const cov=state.rolling?coverage(state.viewWeek):[];
+  if(!cov.length) return Object.values(viewPlan());
+  const out=[], seen=new Set();
+  for(const {day,week} of cov) for(const s of SLOTS){
+    const key=week+'|'+day+'|'+s;
+    if(seen.has(key)) continue;
+    seen.add(key);
+    const cell=state.weeks[week][day+'|'+s];
+    if(cell) out.push(cell);
+  }
+  return out;
+}
+
+// One-line description of which days the shopping list covers.
+function shopCoverText(){
+  const v=state.viewWeek;
+  if(!state.rolling) return `Covers all of Week ${v+1}.`;
+  const cov=coverage(v);
+  if(!cov.length) return `No cook days selected, so this covers all of Week ${v+1}.`;
+  const byWeek=new Map();
+  for(const {day,week} of cov){
+    if(!byWeek.has(week)) byWeek.set(week,new Set());
+    byWeek.get(week).add(day);
+  }
+  const order=w=>(w-v+WEEKS)%WEEKS;
+  return 'Covers '+[...byWeek.keys()].sort((a,b)=>order(a)-order(b)).map(w=>
+    `Week ${w+1}: ${DAYS.filter(d=>byWeek.get(w).has(d)).map(d=>d.slice(0,3)).join(', ')}`).join('; ')+'.';
+}
+
 function shopTotals(){
   const totals=new Map();
   const skips=viewSkips();
@@ -547,7 +595,7 @@ function shopTotals(){
     if(!totals.has(k)) totals.set(k,{key:k,name:name.trim(),unit,qty:0});
     totals.get(k).qty+=qty;
   };
-  for(const cell of Object.values(viewPlan())){
+  for(const cell of shopCells()){
     const m=getMeal(cell.meal); if(!m) continue;
     for(const i of m.ingredients){
       const a=amountFor(i,cell);
@@ -562,6 +610,7 @@ function shopTotals(){
 }
 
 function renderShop(){
+  $('shopcover').textContent=shopCoverText();
   const rows=shopTotals();
   const ticks=viewTicks();
   if(!rows.length){
@@ -592,6 +641,12 @@ function render(){
   renderCook();renderStaples();renderShop();
 }
 
+// Records a manual choice of cook days for today.
+function setCookDays(list){
+  state.cookOverride={date:todayStr(),days:sortDays(list.map(x=>({day:x.day,off:x.off})))};
+  save();
+}
+
 $('reload').onclick=loadSheet;
 $('clearTicks').onclick=()=>{state.tickedW[state.viewWeek]={};save();};
 
@@ -599,6 +654,12 @@ document.addEventListener('click',e=>{
   const d=e.target.dataset||{};
   if(d.cookauto){
     state.cookOverride=null; save();
+  }
+  if(d.preset!==undefined){
+    const p=PRESETS[+d.preset]; if(p) setCookDays(presetDays(p));
+  }
+  if(d.cookclear){
+    setCookDays([]);
   }
   if(d.staplesall){
     const skips={};
@@ -626,9 +687,13 @@ document.addEventListener('change',e=>{
     if(t.checked) delete skips[d.staple]; else skips[d.staple]=true;
     save(); return;
   }
-  if(d.cook!==undefined){
-    state.cookOverride={date:todayStr(),name:t.checked?d.cook:''};
-    save(); return;
+  if(d.cdday!==undefined){
+    const list=currentDays().map(x=>({day:x.day,off:x.off}));
+    const off=+d.cdoff, day=d.cdday;
+    const i=list.findIndex(x=>x.day===day&&x.off===off);
+    if(t.checked&&i<0) list.push({day,off});
+    if(!t.checked&&i>=0) list.splice(i,1);
+    setCookDays(list); return;
   }
   if(d.viewweek!==undefined){
     state.viewWeek=+d.viewweek;
